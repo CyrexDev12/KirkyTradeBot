@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d17">
+  <title>NFL Fair Value | Pregame Analytics</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Primary navigation">
+      <div class="brand-mark">FV<span>.</span></div>
+      <div class="rail-divider"></div>
+      <button class="rail-icon active" title="Dashboard" aria-label="Dashboard">▦</button>
+      <button class="rail-icon" id="rail-validation" title="Model validation" aria-label="Model validation">◫</button>
+      <div class="rail-spacer"></div>
+      <div class="rail-nfl">NFL</div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="wordmark"><span class="signal-pip"></span> GAMETIME <span class="slash">/</span> FAIR VALUE</div>
+        <div class="topbar-right"><span class="live-dot"></span><span>PRE-GAME ANALYTICS</span><span class="topbar-rule"></span><span id="clock">--:--</span></div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="eyebrow-rule"></span> NFL PREDICTION TERMINAL <span class="eyebrow-index">01 / MODEL × MARKET</span></div>
+            <h1>Find the <em>fair value</em><br>behind every matchup<span class="period">.</span></h1>
+            <p>Independent pregame win probabilities and projected game totals from NFLverse history, compared with live Polymarket US quotes.</p>
+          </div>
+          <div class="hero-graphic" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><div class="graphic-center"><span>FV</span><small>01</small></div><div class="graphic-cross cross-a"></div><div class="graphic-cross cross-b"></div></div>
+        </section>
+
+        <section class="overview" aria-label="Dashboard summary">
+          <div class="overview-item"><div class="stat-label">GAMES THIS WEEK</div><div class="stat-value" id="stat-games">—</div><div class="stat-foot">NFL schedule</div></div>
+          <div class="overview-item"><div class="stat-label">MARKET COVERAGE</div><div class="stat-value" id="stat-markets">—</div><div class="stat-foot">Verified full-game markets</div></div>
+          <div class="overview-item"><div class="stat-label">TOP EST. NET EDGE</div><div class="stat-value accent" id="stat-edge">—</div><div class="stat-foot">At selected trade size</div></div>
+          <div class="overview-item"><div class="stat-label">TOTALS MODEL MAE</div><div class="stat-value" id="stat-brier">—</div><div class="stat-foot">Season walk-forward · points</div></div>
+        </section>
+
+        <section class="content-section">
+          <div class="section-head"><div><div class="eyebrow small"><span class="eyebrow-rule"></span> THE BOARD</div><h2>Weekly matchups <span id="week-title"></span></h2></div><div class="asof"><span class="pulse-dot"></span><span id="freshness">Market refresh pending</span></div></div>
+          <div id="alert" class="alert hidden" role="status"></div>
+          <div class="toolbar">
+            <div class="week-controls"><button id="prev-week" class="square-btn" aria-label="Previous week">‹</button><label><span>SEASON</span><select id="season"></select></label><label><span>WEEK</span><select id="week"></select></label><button id="next-week" class="square-btn" aria-label="Next week">›</button></div>
+            <div class="toolbar-right"><label class="size-control"><span>TRADE SIZE</span><input id="quantity" type="number" min="1" max="10000" step="1" value="100"><small>contracts</small></label><button id="refresh" class="refresh-btn"><span class="refresh-symbol">↻</span> Refresh quotes</button></div>
+          </div>
+          <div class="filterbar"><div class="chips" role="group" aria-label="Game filters"><button class="chip selected" data-filter="all">All games</button><button class="chip" data-filter="upcoming">Upcoming</button><button class="chip" data-filter="markets">With markets</button></div><div class="filterbar-right"><input id="search" class="search" type="search" placeholder="Search team..." aria-label="Search team"><select id="sort" aria-label="Sort games"><option value="kickoff">Kickoff time</option><option value="edge">Highest net edge</option><option value="difference">Largest model difference</option><option value="probability">Highest model probability</option></select><div class="view-toggle" role="group" aria-label="View"><button id="card-view" class="selected" aria-label="Cards">▦</button><button id="table-view" aria-label="Table">☷</button></div></div></div>
+          <div id="board" class="board"><div class="loading">Loading NFL schedule and model data…</div></div>
+        </section>
+
+        <section class="method-strip"><div class="method-icon">i</div><p><strong>How to read the board</strong> Projected total is an independent estimate of combined points including overtime. The featured Polymarket total is the line with a market price nearest 50%; open matchup details for every listed line. Model percentage is an estimate, and market percentage is the exchange display price. Net edge uses order book cost and estimated taker fees at your trade size; it does not establish profitability.</p><button id="method-link">View validation <span>↗</span></button></section>
+        <footer><span>GAMETIME FAIR VALUE <b>© 2026</b></span><span>Data: NFLverse · Polymarket US <i>·</i> Pregame only</span></footer>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Game analysis"><div class="modal-backdrop" data-close="true"></div><div class="modal-panel"><button class="modal-close" data-close="true" aria-label="Close analysis">×</button><div id="modal-content"></div></div></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
