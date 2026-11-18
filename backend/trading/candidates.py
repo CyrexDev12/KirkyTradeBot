@@ -16,7 +16,8 @@ from .common import ONE, ZERO, D, iso, on_tick
 from .config import StrategyConfig
 from .contracts import ContractSpec, MappingError
 from .fees import execution_fee
-from .path_model import AnalogueEstimator, bucket
+from .config import FROZEN_THESIS_PRICE_EXITS
+from .path_model import AnalogueEstimator, bucket, modeled_estimate
 from .paper_engine import TradePlan, deadlines
 from .risk import Exposure, size
 from .scoring import Rating, RatingInputs, components, combine
@@ -106,6 +107,16 @@ class Decision:
         return out
 
 
+def effective_value(v: ModelValuation, cfg: StrategyConfig) -> Decimal:
+    """Model low-end value using ``uncertainty_band_scale`` of its documented band."""
+    return v.fair_value - cfg.uncertainty_band_scale * (v.fair_value - v.lower)
+
+
+def floor_tick(price: Decimal, tick: Decimal) -> Decimal:
+    from decimal import ROUND_FLOOR
+    return (price / tick).to_integral_value(ROUND_FLOOR) * tick
+
+
 def all_in_cost(entry: Decimal, theta: Decimal) -> Decimal:
     """Per-contract cost at the entry limit for a 100-contract reference execution."""
     return entry + execution_fee(theta, [(entry, D(100))]) / D(100)
@@ -148,25 +159,30 @@ def evaluate(inp: CandidateInput, cfg: StrategyConfig, theta: Decimal, estimator
     if view.best_ask is None or view.best_bid is None:
         return d.reject("INSUFFICIENT_LIQUIDITY", "one side of the selected book is empty")
     tick = spec.tick_size
+    gb_eff, mc_eff = effective_value(inp.gb, cfg), effective_value(inp.mc, cfg)
+    max_multiple = cfg.max_target_multiple_pregame if cfg.hold_policy != FROZEN_THESIS_PRICE_EXITS else None
     for k in cfg.grid_entry_ticks_below_ask:
         entry = view.best_ask - tick * k
         if entry <= 0 or not on_tick(entry, tick):
             continue
         cost = all_in_cost(entry, theta)
-        gb_margin, mc_margin = inp.gb.lower - cost, inp.mc.lower - cost
-        for t in cfg.grid_target_offsets:
-            for s in cfg.grid_stop_offsets:
-                target, stop = entry + D(t), entry - D(s)
-                if not (on_tick(target, tick) and on_tick(stop, tick)):
-                    d.reject("PLAN_INVALID_FOR_BOOK", f"target/stop not on the {tick} tick grid")
+        gb_margin, mc_margin = gb_eff - cost, mc_eff - cost
+        # 5. Both models support the SAME selected contract at this entry after costs.
+        if min(gb_margin, mc_margin) < cfg.min_valuation_margin:
+            d.combos.append(Combo(entry, entry, entry, "", cost, gb_margin, mc_margin, None))
+            d.reject("NO_MODEL_CONSENSUS", f"entry {entry}: GB margin {gb_margin:.4f}, MC margin {mc_margin:.4f}")
+            continue
+        for t in cfg.grid_target_multiples:
+            if max_multiple is not None and D(t) > max_multiple:
+                continue
+            for s in cfg.grid_stop_fractions:
+                target, stop = floor_tick(entry * D(t), tick), floor_tick(entry * D(s), tick)
+                if target > cfg.max_target_price:
+                    d.reject("PLAN_INVALID_FOR_BOOK", f"{t}x target {target} above the {cfg.max_target_price} cap")
                     continue
                 combo = Combo(entry, target, stop, bucket(spec.market_type, cfg.hold_policy, entry, target, stop),
                               cost, gb_margin, mc_margin, None)
                 d.combos.append(combo)
-                # 5. Both models support the SAME selected contract at this entry after costs.
-                if min(gb_margin, mc_margin) < cfg.min_valuation_margin:
-                    d.reject("NO_MODEL_CONSENSUS", f"entry {entry}: GB margin {gb_margin:.4f}, MC margin {mc_margin:.4f}")
-                    continue
                 # 7. Explicit, legal plan for the current book.
                 if not ZERO < stop < entry < target < ONE:
                     d.reject("PLAN_INVALID_FOR_BOOK", "target/stop outside (0, 1)")
@@ -176,11 +192,16 @@ def evaluate(inp: CandidateInput, cfg: StrategyConfig, theta: Decimal, estimator
                     continue
                 # 8. Market-path estimator supported for this market type, price regime and horizon.
                 est = estimator.estimate(combo.bucket, before=inp.now)
+                if not est.supported and cfg.allow_modeled_path_estimates and k == 0 \
+                        and cfg.hold_policy == FROZEN_THESIS_PRICE_EXITS:
+                    # No recorded history yet: price the trade from the modeled path (labeled as such).
+                    est = modeled_estimate(entry, target, stop, min(gb_eff, mc_eff), theta, cfg, combo.bucket)
                 combo.estimate = est
                 if not est.supported:
                     d.reject("INSUFFICIENT_EXECUTION_HISTORY", "; ".join(est.reasons) or "unsupported")
                     continue
-                if cfg.rated_trades_require_validation and combo.bucket not in (validated_buckets or set()):
+                if est.recorded and cfg.rated_trades_require_validation \
+                        and combo.bucket not in (validated_buckets or set()):
                     d.reject("INSUFFICIENT_EXECUTION_HISTORY", "no passing forward-validation artifact for this bucket")
                     continue
                 # 9. Conservative net expectancy after costs.
@@ -248,7 +269,7 @@ def finalize(d: Decision, inp: CandidateInput, cfg: StrategyConfig, theta: Decim
             continue
         # Final-size recheck: exact fees at this quantity must keep both model margins.
         per_contract = sizing.entry_cost / sizing.quantity
-        if min(inp.gb.lower, inp.mc.lower) - per_contract < cfg.min_valuation_margin:
+        if min(combo.gb_margin, combo.mc_margin) + combo.cost_per_contract - per_contract < cfg.min_valuation_margin:
             d.reject("NO_MODEL_CONSENSUS", "margin disappears at the final size")
             continue
         if rating.value < cfg.min_trade_rating:
@@ -269,6 +290,8 @@ def finalize(d: Decision, inp: CandidateInput, cfg: StrategyConfig, theta: Decim
             full_funded_loss=sizing.full_funded_loss,
             meta={"plan_key": plan_key, "bucket": combo.bucket, "gb": inp.gb.to_dict(), "mc": inp.mc.to_dict(),
                   "path_estimate": est.to_dict(), "rating": rating.to_dict(),
+                  "evidence": "recorded price history" if est.recorded else "modeled price path (no recorded history yet)",
+                  "target_multiple": str((combo.target / combo.entry).quantize(Decimal("0.01"))),
                   "quote_as_of": iso(inp.snapshot.received_at), "ranking_objective": cfg.ranking_objective,
                   "fee_theta": str(theta)})
         d.notes += [f"(other grid points) {c}" for c in d.codes]

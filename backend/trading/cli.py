@@ -132,10 +132,11 @@ def cmd_label(store, cfg, args):
                 tick = D(c["tick_size"])
                 if view.best_ask is not None:
                     for k in cfg.grid_entry_ticks_below_ask:
-                        for tt in cfg.grid_target_offsets:
-                            for ss in cfg.grid_stop_offsets:
+                        for tt in cfg.grid_target_multiples:
+                            for ss in cfg.grid_stop_fractions:
+                                from .candidates import floor_tick
                                 entry = view.best_ask - tick * k
-                                target, stop = entry + D(tt), entry - D(ss)
+                                target, stop = floor_tick(entry * D(tt), tick), floor_tick(entry * D(ss), tick)
                                 if not D(0) < stop < entry < target < D(1):
                                     continue
                                 plan = TradePlan(

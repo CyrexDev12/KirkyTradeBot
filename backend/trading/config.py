@@ -26,7 +26,10 @@ class StrategyConfig:
     starting_equity_usd: Decimal = Decimal("100.00")
     display_timezone: str = "America/Phoenix"
     min_trade_rating: Decimal = Decimal("6.5")
-    min_valuation_margin: Decimal = Decimal("0.02")
+    min_valuation_margin: Decimal = Decimal("0.01")
+    # Fraction of each model's calibration error band used for its low-end value
+    # (1.0 = the full band; 0.5 = half). Lower = less conservative.
+    uncertainty_band_scale: Decimal = Decimal("0.5")
     max_open_positions: int = 3
     max_active_trades_per_game: int = 1
     max_funded_loss_fraction_per_game: Decimal = Decimal("0.15")
@@ -59,12 +62,18 @@ class StrategyConfig:
     # Fee profile: explicitly chosen conservative small-account taker profile.
     fee_profile_id: str = "polymarket-us-taker-lowest-volume-2026-11-14"
     # Frozen candidate grid (in ticks) and ranking objective identity.
-    # Entry offsets are venue ticks below the current selected ask; target and stop
-    # distances are in price (dollars per $1 contract) so the grid does not change
-    # meaning when a venue's tick size changes (Polymarket US NFL markets use 0.0025).
+    # Entry offsets are venue ticks below the current selected ask. Targets are
+    # multiples of the entry price (1.5x-3x) and stops are fractions of it, both
+    # rounded down to the venue tick (Polymarket US NFL: 0.0025 moneyline, 0.005 totals).
     grid_entry_ticks_below_ask: tuple = (0, 1, 2)
-    grid_target_offsets: tuple = ("0.05", "0.10", "0.15")
-    grid_stop_offsets: tuple = ("0.03", "0.04", "0.06")
+    grid_target_multiples: tuple = ("1.5", "2", "2.5", "3")
+    grid_stop_fractions: tuple = ("0.6", "0.75")
+    max_target_price: Decimal = Decimal("0.95")
+    max_target_multiple_pregame: Decimal = Decimal("1.5")  # pregame-only moves are smaller than in-game swings
+    # Modeled price path, used only while recorded history cannot support an estimate.
+    allow_modeled_path_estimates: bool = True
+    modeled_path_haircut: Decimal = Decimal("0.01")  # subtracted from the model value for the lower bound
+    modeled_path_stop_gap: Decimal = Decimal("0.01")  # assumed fill below the stop trigger
     ranking_objective: str = "lower_bound_net_pnl_per_committed_dollar-v1"
     rating_version: str = "rating-v1-dev-defaults"
     # Market-path readiness policy. Not a claim that these counts prove anything.

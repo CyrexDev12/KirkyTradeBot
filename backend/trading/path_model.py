@@ -35,11 +35,12 @@ EXIT_LABELS = ("TARGET", "STOP", "TIME", "SETTLEMENT")
 
 
 def bucket(market_type: str, hold_policy: str, entry: Decimal, target: Decimal, stop: Decimal) -> str:
-    """Analogue bucket: market type, holding profile, 5-cent entry band, target/stop distance in cents."""
+    """Analogue bucket: market type, holding profile, 5-cent entry band, target and stop as multiples of entry."""
     entry_band = (entry / Decimal("0.05")).to_integral_value(ROUND_FLOOR) * Decimal("0.05")
-    t = ((target - entry) * 100).quantize(Decimal("0.01"))
-    s = ((entry - stop) * 100).quantize(Decimal("0.01"))
-    return f"{market_type}|{hold_policy}|e{entry_band:.2f}|t{t.normalize()}c|s{s.normalize()}c"
+    step = Decimal("0.05")
+    t = ((target / entry) / step).to_integral_value() * step
+    s = ((stop / entry) / step).to_integral_value() * step
+    return f"{market_type}|{hold_policy}|e{entry_band:.2f}|t{t:.2f}x|s{s:.2f}x"
 
 
 def label_path(plan: TradePlan, snapshots, cfg: StrategyConfig, settlement_payout: Decimal | None = None,
@@ -137,6 +138,10 @@ class PathEstimate:
 
     @property
     def supported(self) -> bool:
+        return self.status in ("supported", "modeled")
+
+    @property
+    def recorded(self) -> bool:
         return self.status == "supported"
 
     def to_dict(self):
@@ -147,6 +152,52 @@ class PathEstimate:
         d["state_probabilities"] = {k: str(v) for k, v in self.state_probabilities.items()}
         d["target_interval"] = [str(x) for x in self.target_interval] if self.target_interval else None
         return d
+
+
+def modeled_estimate(entry: Decimal, target: Decimal, stop: Decimal, value: Decimal, theta: Decimal,
+                     cfg: StrategyConfig, bucket_key: str | None = None) -> PathEstimate:
+    """Price-path estimate from the models' value when recorded history is not yet sufficient.
+
+    Assumption (stated, not measured): the contract price moves continuously and
+    its expected future level is the conservative consensus model value ``value``
+    (already reduced by each model's uncertainty band). For such a martingale the
+    chance of touching the target before the stop is the gambler's-ruin ratio
+
+        P(target first) = (value - stop) / (target - stop)
+
+    Holding through settlement (FROZEN_THESIS_PRICE_EXITS) the price must cross
+    one barrier before it settles at 0 or 1, so P(stop first) = 1 - P(target).
+    Net P&L per contract uses taker fees on both legs and a stop filled
+    ``modeled_path_stop_gap`` below its trigger. The lower bound repeats the
+    calculation with ``value - modeled_path_haircut``. A marketable entry at the
+    current ask is assumed to fill. Rating evidence for these estimates is zero.
+    """
+    def fee(px):
+        return theta * px * (1 - px)
+
+    cost = entry + fee(entry)
+    win = target - fee(target)
+    stop_px = max(Decimal("0.0025"), stop - cfg.modeled_path_stop_gap)
+    loss_exit = stop_px - fee(stop_px)
+
+    def prob(v):
+        return min(Decimal(1), max(Decimal(0), (v - stop) / (target - stop)))
+
+    def ret(v):
+        p = prob(v)
+        return (p * win + (1 - p) * loss_exit - cost) / cost
+
+    p_hi, p_lo = prob(value), prob(value - cfg.modeled_path_haircut)
+    est = PathEstimate(status="modeled", bucket=bucket_key, fill_probability=Decimal(1),
+                       censored_fraction=Decimal(0), target_interval=(p_lo.quantize(Q4), p_hi.quantize(Q4)),
+                       expected_return=ret(value).quantize(Q4),
+                       lower_return=ret(value - cfg.modeled_path_haircut).quantize(Q4),
+                       reasons=["modeled price path: no recorded history for this bucket yet"])
+    est.state_probabilities = {"TARGET": p_hi.quantize(Q4), "STOP": (1 - p_hi).quantize(Q4)}
+    return est
+
+
+Q4 = Decimal("0.0001")
 
 
 class AnalogueEstimator:

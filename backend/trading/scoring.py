@@ -64,7 +64,8 @@ class Rating:
     def to_dict(self):
         d = asdict(self)
         d["value"] = str(self.value) if self.value is not None else None
-        d["components"] = {k: (str(v) if v is not None else None) for k, v in self.components.items()}
+        d["components"] = {k: (str(D(v).quantize(Decimal("0.001"))) if v is not None else None)
+                           for k, v in self.components.items()}
         return d
 
 

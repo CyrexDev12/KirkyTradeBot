@@ -40,6 +40,14 @@ def ts(value) -> str:
     return f"<t:{int(utc(value).timestamp())}:f>"
 
 
+def _c(value) -> str:
+    return cents_text(value) if value is not None else "—"
+
+
+def _pct(value) -> str:
+    return f"{D(value) * 100:.0f}%" if value is not None else "—"
+
+
 def money(value) -> str:
     v = D(value)
     return f"-${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
@@ -91,27 +99,33 @@ def trade_card(plan, status: str, reason: str | None = None) -> dict:
     fields = [
         ("Contract", f"{p['game_id']} · {market} · **{p['selected_outcome']}** ({p['selected_side']} side)\n"
                      f"Kickoff {ts(p['kickoff'])}"),
-        ("Plan", f"Entry limit **{cents_text(p['entry_limit'])}** · target **{cents_text(p['target_limit'])}** · "
+        ("Plan", f"Entry limit **{cents_text(p['entry_limit'])}** · target **{cents_text(p['target_limit'])}** "
+                 f"({D(p['target_limit']) / D(p['entry_limit']):.2f}×) · "
                  f"stop trigger **{cents_text(p['stop_trigger'])}**\nEntry expires {ts(p['entry_expires_at'])} · "
                  f"time exit {ts(p['exit_deadline'])}\nHolding policy {p['hold_policy']}"),
         ("Size and risk", f"Quantity {p['quantity']} · est. all-in cash {money(p['estimated_entry_cost'])}\n"
                           f"Stressed stop loss {money(p['planned_loss'])} · full funded loss "
                           f"{money(p['full_funded_loss'])}"),
         ("Pregame model values (separate)",
-         f"GB {gb.get('fair_value')} [{gb.get('lower')}–{gb.get('upper')}]\n"
-         f"MC {mc.get('fair_value')} [{mc.get('lower')}–{mc.get('upper')}]"),
+         f"GB {_c(gb.get('fair_value'))} (range {_c(gb.get('lower'))}–{_c(gb.get('upper'))})\n"
+         f"MC {_c(mc.get('fair_value'))} (range {_c(mc.get('lower'))}–{_c(mc.get('upper'))})"),
     ]
-    if est.get("status") == "supported":
+    if est.get("status") in ("supported", "modeled"):
         probs = est.get("state_probabilities") or {}
-        fields.append(("Path estimate (conditional on fill)",
-                       f"P(fill) {est.get('fill_probability')} · target {probs.get('TARGET')} · stop {probs.get('STOP')}"
-                       f" · time {probs.get('TIME')}\nLower-bound net return per committed $ {est.get('lower_return')}"
-                       f" · {est.get('games')} games / {est.get('weeks')} weeks"))
+        label = "Path estimate (conditional on fill)" if est.get("status") == "supported" else \
+            "Modeled path estimate (no recorded history yet)"
+        order = ("TARGET", "STOP", "TIME", "SETTLEMENT", "MIXED", "CENSORED")
+        parts = [f"{k.lower()} {_pct(probs[k])}" for k in order if probs.get(k) is not None and D(probs[k]) > 0]
+        fields.append((label,
+                       f"Chance of reaching: {' · '.join(parts)}\n"
+                       f"Expected net return {_pct(est.get('expected_return'))} · conservative {_pct(est.get('lower_return'))}"
+                       + (f" · {est.get('games')} games / {est.get('weeks')} weeks" if est.get('status') == 'supported' else "")))
     else:
         fields.append(("Path estimate", "Unavailable — not shown"))
     comps = rating.get("components") or {}
     fields.append(("Rating", f"**{rating.get('value')}/10** ({rating.get('version')}) — not a probability of profit\n"
-                             + " · ".join(f"{k} {v}" for k, v in comps.items())))
+                             + " · ".join(f"{k.replace('_', ' ')} {D(v):.2f}" if v is not None else f"{k} —"
+                                          for k, v in comps.items())))
     title_status = status if not owned else f"{status} position"
     if status in ("PROPOSED", "WORKING"):
         title_status = f"{status} ENTRY (not a position)"

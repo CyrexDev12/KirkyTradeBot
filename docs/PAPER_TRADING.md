@@ -64,16 +64,20 @@ python -m backend.trading.cli uncertainty --mc-seasons 2024,2025,2026
 python scripts/paper_dry_run.py
 ```
 
-Result of the run on the 2026-11-18 capture (week 11, 13 games, 50 candidate contracts): **0 trades**.
+Result of the run on the 2026-11-18 capture (week 11, 13 games, 50 candidate contracts) with the current settings: **3 paper trades**, all priced by the modeled path.
 
-| Count | Reason | Why |
-| --- | --- | --- |
-| 21 | `NO_MODEL_CONSENSUS` | Both models' lower bounds did not clear the price plus 2¢ |
-| 22 | `UNSUPPORTED_UNCERTAINTY` | Totals: GB has no total-line calibration |
-| 6 | `NO_LISTED_MARKET` | Polymarket's `startTime` for PIT@PHI and JAX@NYG disagreed with both the schedule and the markets' own descriptions |
-| 1 | `INSUFFICIENT_EXECUTION_HISTORY` | TB moneyline cleared both models at 26¢, then stopped for lack of path history |
+| Trade | Entry | Target | Stop | Qty | Cash | Stressed loss | P(target) | Rating |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| IND at HOU | 15.5¢ | 31¢ (2×) | 9.25¢ | 22 | $3.68 | $1.93 | 77% | 7.6 |
+| NO at CHI | 16¢ | 32¢ (2×) | 9.5¢ | 11 | $1.90 | $1.00 | 73% | 7.5 |
+| TB at DET | 26¢ | 78¢ (3×) | 15.5¢ | 7 | $1.95 | $0.98 | 33% | 6.7 |
 
-The account report and plan each posted once, and a repeated publish sent nothing.
+ARI, MIA and NYJ also qualified but hit the 3-position limit. Of the rest:
+- 16 failed model consensus.
+- 22 were totals (GB has no total-line calibration).
+- 6 were the PIT@PHI and JAX@NYG markets, whose listed `startTime` disagrees with the schedule.
+
+The account report, the plan and each trade card posted once, and a repeated publish sent nothing.
 
 ## Discord commands
 
@@ -99,13 +103,23 @@ The account report and plan each posted once, and a repeated publish sent nothin
   - `PREGAME_ONLY`: liquidation starts 5 min before kickoff.
 - Fees use `theta × contracts × p × (1−p)` with θ = 0.095 (taker, lowest-volume tier, effective 2026-11-14). Each fill is rounded to the cent, and the total is capped at the rounded sum. No promotional coefficient and no rebates.
 
-## Why the first weeks will publish zero trades
+## Targets, stops and trading before price history exists
 
-The project has no timestamped historical Polymarket quotes. A rated trade needs a market-path estimate for its bucket (market type, price band, target/stop distance, holding profile). That estimate needs at least 30 games, 6 weeks and 30 uncensored filled paths, and no more than 10% censored. The trade also needs a passing chronological validation artifact for the bucket. Until then the honest result is:
+**Targets and stops.** Targets are multiples of the entry price: 1.5×, 2×, 2.5× and 3×. Stops are 60% or 75% of entry. Both are rounded down to the venue tick. Two limits apply:
+- No target above 95¢. That rules out most favorites; an 80¢ contract can't reach 1.5×.
+- The `PREGAME_ONLY` profile is capped at 1.5×, because pregame moves are smaller than in-game swings.
 
-> No rated trades this week — insufficient market-path history to estimate scalp outcomes.
+The bot chooses among these by expected net return after fees, so the right multiple depends on the context. A 26¢ underdog held into the game can aim for 3×. A 15¢ contract might aim for 2× with a wider stop.
 
-The worker starts recording books right away. Then run:
+**Modeled price path.** Until recorded history supports a bucket, the bot prices each candidate from its models, as long as the entry is at the current ask and the profile is `FROZEN_THESIS_PRICE_EXITS`. The assumption is that the price moves continuously and its expected level is the conservative model value *v*: the lower of the two models' values after uncertainty. Then:
+
+- P(target before stop) = (v − stop) / (target − stop)
+- Expected return = P × (target − exit fee) + (1 − P) × (stop − 1¢ gap − exit fee) − (entry + entry fee), divided by the entry cost
+- Conservative return = the same with v − 1¢
+
+The trade needs a positive conservative return and a rating of at least 6.5. These estimates carry **zero** evidence weight, so they can't rate above 8.2, and they size in the 1–2% risk tiers. Trade cards label them "Modeled path estimate (no recorded history yet)". Once recorded history exists for a bucket, it replaces the modeled estimate. Set `NFL_PAPER_ALLOW_MODELED_PATH_ESTIMATES=false` to require recorded history.
+
+The worker records books from the start, so recorded history accumulates:
 
 ```bash
 python -m backend.trading.cli label-history   # replay recorded books through the same engine → labeled paths
@@ -117,7 +131,7 @@ Censored paths are kept. They count in coverage, the point estimate books them a
 ## Rating, gates and sizing
 
 - **Gates** run in order with explicit codes: `NO_LISTED_MARKET`, `CONTRACT_MAPPING_FAILED`, `UNSUPPORTED_SETTLEMENT`, `MARKET_NOT_OPEN`, `MC_UNAVAILABLE`, `GB_UNAVAILABLE`, `UNSUPPORTED_UNCERTAINTY`, `STALE_MARKET_DATA`, `UNKNOWN_INCREMENTS`, `INSUFFICIENT_LIQUIDITY`, `NO_MODEL_CONSENSUS`, `PLAN_INVALID_FOR_BOOK`, `INSUFFICIENT_EXECUTION_HISTORY`, `NEGATIVE_NET_EXPECTANCY`, `ENTRIES_SUSPENDED`, `PORTFOLIO_LIMIT`, `RATING_UNAVAILABLE`, `RATING_BELOW_MINIMUM`.
-- **Valuation screen:** `min(GB_lower, MC_lower) − all-in entry cost ≥ 0.02`. It is checked on the reference grid and again at the final size.
+- **Valuation screen:** `min(GB_low, MC_low) − all-in entry cost ≥ 0.01`. Each model's low-end value is its fair value minus **half** its calibration error band (`uncertainty_band_scale` = 0.5). The screen is checked on the reference grid and again at the final size.
 - **Rating:** `round(1 + 9·(0.35a + 0.25b + 0.20c + 0.10d + 0.10e), 1)`. It uses absolute normalization (`rating-v1-dev-defaults`) and never percentile ranks. Missing evidence means no rating. The rating is not a probability of profit.
 - **Sizing ceilings:**
   - Stressed-stop loss per trade: 1%, 2% or 3% of equity by rating tier.

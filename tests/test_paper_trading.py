@@ -361,10 +361,11 @@ def examples(bucket_key, n_games=40, ret="0.25", weeks=8, label="TARGET"):
 def grid_examples(ask=D("0.15"), ret="0.25", tick=D("0.0025")):
     out = []
     for k in CFG.grid_entry_ticks_below_ask:
-        for t in CFG.grid_target_offsets:
-            for s in CFG.grid_stop_offsets:
+        for t in CFG.grid_target_multiples:
+            for s in CFG.grid_stop_fractions:
                 e = ask - tick * k
-                out += examples(bucket("moneyline", CFG.hold_policy, e, e + D(t), e - D(s)), ret=ret)
+                out += examples(bucket("moneyline", CFG.hold_policy, e, cand.floor_tick(e * D(t), tick),
+                                       cand.floor_tick(e * D(s), tick)), ret=ret)
     return out
 
 
@@ -414,14 +415,17 @@ def book_now(now):
     return BookSnapshot("nfl-ind-hou", now, now, "OPEN", ((D("0.13"), D(400)),), ((D("0.15"), D(400)),))
 
 
-def planner_with(tmp_path, examples_rows=(), validated=True, inputs=None, now=T0):
+NO_MODEL_PATH = CFG.with_overrides(allow_modeled_path_estimates=False)
+
+
+def planner_with(tmp_path, examples_rows=(), validated=True, inputs=None, now=T0, cfg=NO_MODEL_PATH):
     store = Store(tmp_path / "plan.sqlite3")
     if examples_rows:
         store.add_path_examples(list(examples_rows), now)
     if validated:
         buckets = {x["bucket"]: {"passed": True} for x in examples_rows}
-        store.save_validation(CFG.version, bool(buckets), {"buckets": buckets, "reasons": []}, now)
-    return store, WeeklyPlanner(store, CFG, inputs or FakeInputs(book_now(now)))
+        store.save_validation(cfg.version, bool(buckets), {"buckets": buckets, "reasons": []}, now)
+    return store, WeeklyPlanner(store, cfg, inputs or FakeInputs(book_now(now)))
 
 
 def test_no_history_week_creates_zero_orders_and_explains(tmp_path):
@@ -456,7 +460,7 @@ def test_supported_trade_is_planned_rated_sized_and_activated_once(tmp_path):
     assert D(trade["planned_loss"]) <= D("0.03") * 100  # rating-tier ceiling of equity
     hou = [d for d in plan_row["payload"]["decisions"] if d["selected_outcome"] == "HOU"][0]
     assert hou["primary_code"] == "NO_MODEL_CONSENSUS"
-    key = plan_key(CFG, 2026, 12)
+    key = plan_key(NO_MODEL_PATH, 2026, 12)
     later = T0 + timedelta(minutes=1)
     planner.inputs.snap = book_now(later)
     first = asyncio.run(planner.activate(key, later))
@@ -464,7 +468,7 @@ def test_supported_trade_is_planned_rated_sized_and_activated_once(tmp_path):
     # Duplicate triggers: same plan returned, no second set of orders.
     assert asyncio.run(planner.run(2026, 12, later))["plan_key"] == key
     assert asyncio.run(planner.activate(key, later)) == []
-    assert len(store.load_engine(CFG).state.orders) == 1
+    assert len(store.load_engine(NO_MODEL_PATH).state.orders) == 1
 
 
 def test_negative_expectancy_rejected_even_if_rating_would_be_high(tmp_path):
@@ -492,13 +496,14 @@ def test_final_size_recheck_catches_fee_rounding_at_the_actual_quantity():
     # Reference all-in cost at 50c is 0.5238/contract (100-lot, cent-rounded fee); at exactly 2 contracts it is 0.525.
     gb = gb_moneyline({"home_probability": 0.5, "kind": "live_pregame"}, "IND", "HOU", D("0.5"),
                       TieEstimate(D(0), D(0), D(0), 1, 0, "t"), UncertaintyProfile("GB", "moneyline", D(0), "t", 1, "t"))
-    lower = D("0.5438")
+    lower = D("0.5338")
     gb = gb.__class__(**{**gb.__dict__, "lower": lower, "fair_value": lower})
     mc = gb.__class__(**{**gb.__dict__, "provider": MC})
     s = BookSnapshot("nfl-ind-hou", T0, T0, "OPEN", ((D("0.48"), D(100)),), ((D("0.50"), D(4)),))
     spec = moneyline_spec(GAME, ml_match(), "IND")
     inp = cand.CandidateInput(GAME, "moneyline", "IND", spec, None, gb, mc, s, T0)
-    cfg = CFG.with_overrides(grid_entry_ticks_below_ask=(0,), rated_trades_require_validation=False)
+    cfg = NO_MODEL_PATH.with_overrides(grid_entry_ticks_below_ask=(0,), rated_trades_require_validation=False,
+                                       uncertainty_band_scale=D(1))
     est = AnalogueEstimator(grid_examples(D("0.50")), cfg)
     d = cand.evaluate(inp, cfg, D("0.095"), est, None)
     assert any(c.partial_rating for c in d.combos)  # passes at the reference size
@@ -684,3 +689,36 @@ def test_live_polymarket_capture_maps_with_real_field_names():
                      {"long": True, "team": {"abbreviation": "pit", "ordering": "away"}},
                      {"long": False, "team": {"abbreviation": "phi", "ordering": "home"}}]}]}
     assert match_event({**game, "home": "PHI", "away": "PIT", "kickoff": "2026-11-22T21:25:00+00:00"}, [pit_event]) is None
+
+
+# ------------------------------------------------ modeled price path
+def test_modeled_path_math_is_the_martingale_identity():
+    from backend.trading.path_model import modeled_estimate
+    cfg = CFG.with_overrides(modeled_path_stop_gap=D(0), modeled_path_haircut=D(0))
+    est = modeled_estimate(D("0.26"), D("0.52"), D("0.195"), D("0.36"), D(0), cfg)
+    p = (D("0.36") - D("0.195")) / (D("0.52") - D("0.195"))
+    assert est.state_probabilities["TARGET"] == p.quantize(D("0.0001"))
+    # With no fees or gap, expected value = model value - price, whatever the target/stop.
+    assert est.expected_return == ((D("0.36") - D("0.26")) / D("0.26")).quantize(D("0.0001"))
+    fees = modeled_estimate(D("0.26"), D("0.52"), D("0.195"), D("0.36"), D("0.095"), CFG)
+    assert fees.lower_return < fees.expected_return < est.expected_return and fees.status == "modeled"
+    assert fees.supported and not fees.recorded
+
+
+def test_modeled_path_plans_a_multiple_target_trade_without_history(tmp_path):
+    store, planner = planner_with(tmp_path, cfg=CFG)
+    row = asyncio.run(planner.run(2026, 12, T0))
+    ind = [d for d in row["payload"]["decisions"] if d["selected_outcome"] == "IND"][0]
+    hou = [d for d in row["payload"]["decisions"] if d["selected_outcome"] == "HOU"][0]
+    assert hou["primary_code"] == "NO_MODEL_CONSENSUS"
+    if ind["accepted"]:
+        plan = ind["plan"]
+        assert plan["meta"]["evidence"].startswith("modeled") and D(plan["entry_limit"]) == D("0.15")
+        assert D(plan["target_limit"]) / D(plan["entry_limit"]) >= D("1.5")
+        assert D(plan["planned_loss"]) <= D("2.00")  # rating tiers without recorded evidence stay small
+    else:
+        assert ind["primary_code"] in ("RATING_BELOW_MINIMUM", "NEGATIVE_NET_EXPECTANCY")
+    off = CFG.with_overrides(allow_modeled_path_estimates=False)
+    _, planner2 = planner_with(tmp_path / "off", cfg=off)
+    row2 = asyncio.run(planner2.run(2026, 12, T0))
+    assert row2["summary"]["qualifying_trades"] == 0
