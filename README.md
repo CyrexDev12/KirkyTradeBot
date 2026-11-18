@@ -117,6 +117,10 @@ For the archived Colts-at-Texans artifact created November 17 at 10:07 AM Arizon
 
 The pooled residual bank has finite support and cannot capture every matchup's volatility, lineup changes, or injuries. More draws reduce sampling noise. At a 50% estimate and 50,000 draws, numerical standard error is about 0.224 percentage points. Team-rating and distribution-model uncertainty require separate forward validation. Final-tie frequency is especially sensitive to integer rounding. Predictions remain labeled **Experimental score approximation**.
 
+## Paper trading (PAPER_ONLY)
+
+A separate `paper-worker` service runs a persistent $100 **paper** account. It records public Polymarket US books, plans weekly contract-price trades only when both the GB model and the MC model support the same contract after costs, simulates fills conservatively against observed depth, and posts plans, trade cards and weekly reports to Discord (`/picks`, `/trade`, `/account`, `/performance`, `/why-no-trades`, `/health`). It never submits real orders. Until enough market-path history is recorded and validated, it correctly publishes zero rated trades. See [docs/PAPER_TRADING.md](docs/PAPER_TRADING.md) for setup, rules and the capability report. The `/api/paper/*` endpoints are listed at `/docs`.
+
 ## API
 
 | Endpoint | Description |
@@ -147,6 +151,8 @@ API docs are available at `/docs`. A `refresh=true` query parameter bypasses the
 ```
 
 The integrity tests cover current-game leakage, strict winner and total market matching, short-side order book execution, and net-edge math.
+
+Paper-trading tests (`tests/test_paper_trading.py`) cover fills, liquidity reuse, partial exits, stop gaps, outages, settlement, sizing, gates, rating thresholds, censoring, restart, deterministic replay, Discord reconciliation, and the PAPER_ONLY guard.
 
 MC tests additionally cover season and cutoff isolation, incomplete results, weighted ridge effects, forward residual provenance, neutral symmetry, paired score coherence, deterministic concurrent caches, kickoff freezing, schedule changes, rounding, numerical convergence, settlement mapping, matched evaluation, and API mode compatibility.
 

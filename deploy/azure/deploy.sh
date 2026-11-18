@@ -74,6 +74,6 @@ mkdir -p "$project_root/.deploy"
 tar -czf "$project_root/.deploy/app.tar.gz" --exclude=__pycache__ -C "$project_root" backend bot frontend requirements.txt Dockerfile compose.yaml .dockerignore .env.example
 scp "${ssh_options[@]}" "$project_root/.deploy/app.tar.gz" "$remote:nfl-upload/app.tar.gz"
 scp "${ssh_options[@]}" "$token_file" "$remote:nfl-upload/token"
-ssh "${ssh_options[@]}" "$remote" 'set -e; tar -xzf ~/nfl-upload/app.tar.gz -C ~/nfl-fair-value; cd ~/nfl-fair-value; mkdir -p .secrets; chmod 700 .secrets; sudo install -o 10001 -g 10001 -m 0400 ~/nfl-upload/token .secrets/discord_token.txt; rm ~/nfl-upload/token; sudo docker compose up --build -d --wait --wait-timeout 900; sudo docker compose ps'
+ssh "${ssh_options[@]}" "$remote" 'set -e; tar -xzf ~/nfl-upload/app.tar.gz -C ~/nfl-fair-value; cd ~/nfl-fair-value; mkdir -p .secrets; chmod 700 .secrets; sudo install -o 10001 -g 10001 -m 0400 ~/nfl-upload/token .secrets/discord_token.txt; rm ~/nfl-upload/token; test -s .secrets/paper_operator_token.txt || openssl rand -hex 32 | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin .secrets/paper_operator_token.txt; sudo docker compose up --build -d --wait --wait-timeout 900; sudo docker compose ps'
 echo "Deployed in $location. Use /alerts setup in Discord to choose the channel."
 echo "Admin connection: ssh -i $private_key $remote"

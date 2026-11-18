@@ -15,6 +15,7 @@ from discord.ext import tasks
 
 from .api import PredictionAPI
 from .messages import matchup_embed, timestamp, week_embed
+from .paper import PaperPosts, PaperPublisher, PaperTransport, register_paper_commands
 from .scheduler import AlertScheduler, utcnow
 from .storage import Store
 
@@ -76,7 +77,7 @@ async def report_error(interaction, error):
     logger.warning("Discord interaction failed (%s)", type(error).__name__)
     text = "Predictions are temporarily unavailable. Try again shortly or check /botstatus."
     if isinstance(error, app_commands.CheckFailure):
-        text = "Managing alerts requires the Manage Server permission."
+        text = "This command requires the Manage Server permission."
     if interaction.response.is_done():
         await interaction.followup.send(text, ephemeral=True)
     else:
@@ -90,8 +91,11 @@ class NFLBot(discord.Client):
         self.api, self.store, self.guild_id = api, store, guild_id
         self.tree = app_commands.CommandTree(self)
         self.scheduler = AlertScheduler(api, store, DiscordTransport(self))
+        self.paper_posts = PaperPosts(store.path)
+        self.paper_publisher = PaperPublisher(api, self.paper_posts, PaperTransport(self))
         self.tree.on_error = report_error
         self.register_commands()
+        register_paper_commands(self, self.paper_posts)
 
     async def setup_hook(self):
         if self.guild_id:
@@ -116,6 +120,12 @@ class NFLBot(discord.Client):
         except Exception as exc:
             self.scheduler.last_error = f"Backend unavailable ({type(exc).__name__}). Retrying next minute."
             logger.warning("Alert poll failed (%s)", type(exc).__name__)
+        if getattr(self.api, "token", None):
+            try:
+                await self.paper_publisher.tick()
+            except Exception as exc:
+                self.paper_publisher.last_error = f"Paper outbox unavailable ({type(exc).__name__})"
+                logger.warning("Paper publication poll failed (%s)", type(exc).__name__)
         self.store.path.with_suffix(".heartbeat").write_text(str(time.time()))
 
     @post_alerts.before_loop
@@ -191,11 +201,14 @@ class NFLBot(discord.Client):
                 "**/nextgame** — next kickoff within seven days\n"
                 "**/botstatus** — backend and alert status\n"
                 "**/alerts setup** — choose a channel and lead time (Manage Server)\n"
-                "**/alerts disable** — stop automatic posts (Manage Server)\n\n"
+                "**/alerts disable** — stop automatic posts (Manage Server)\n"
+                "**/picks · /trade · /account · /performance · /why-no-trades · /health** — PAPER trading account\n"
+                "**/paper-channels set · /paper-pause · /paper-resume** — paper routing and entry controls (Manage Server)\n\n"
                 "Existing-model win probabilities exclude ties. Monte Carlo shows home wins, away wins and final ties "
                 "separately, with a conditional comparison. Its score model is experimental. "
                 "Early-season and postseason games can have unavailable MC forecasts. "
-                "Matchup buttons stay active for 15 minutes. Run /weeklymatchup again to refresh them.",
+                "Matchup buttons stay active for 15 minutes. Run /weeklymatchup again to refresh them. "
+                "Paper trades are simulated with a $100 paper account; nothing is sent to an exchange.",
                 ephemeral=True)
 
         alerts = app_commands.Group(name="alerts", description="Configure this server's pregame prediction posts",

@@ -181,7 +181,9 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
     async def check():
         bot = NFLBot(API(payload),Store(tmp_path/"bot.db"),12,123)
         commands = {c.name:c for c in bot.tree.get_commands()}
-        assert set(commands) == {"weeklymatchup","matchup","nextgame","botstatus","help","alerts"}
+        assert set(commands) == {"weeklymatchup","matchup","nextgame","botstatus","help","alerts",
+                                 "picks","trade","account","performance","why-no-trades","health",
+                                 "paper-pause","paper-resume","paper-channels"}
         assert bot.intents.value == 1
         for command in commands.values():
             command.to_dict(bot.tree)
