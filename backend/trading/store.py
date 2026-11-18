@@ -168,7 +168,7 @@ class Store:
 
     def pending_publications(self, limit=20) -> list[dict]:
         with closing(self.connect()) as db:
-            rows = db.execute("SELECT * FROM discord_outbox WHERE status='pending' ORDER BY created_at, publication_id "
+            rows = db.execute("SELECT * FROM discord_outbox WHERE status='pending' ORDER BY created_at, rowid "
                               "LIMIT ?", (limit,)).fetchall()
         return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 

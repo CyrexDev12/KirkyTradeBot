@@ -49,6 +49,21 @@ def cmd_mock(store, cfg, args):
         raise SystemExit("Mock run did not reconcile")
 
 
+def _merge_bins(bins: list[dict]) -> list[dict]:
+    """Pool per-season calibration bins with the same decile index (count-weighted)."""
+    pooled: dict = {}
+    for b in bins:
+        key = b.get("bin", round(float(b["predicted"]), 1))
+        n = int(b.get("games") or 0)
+        if not n:
+            continue
+        acc = pooled.setdefault(key, [0, 0.0, 0.0])
+        acc[0] += n
+        acc[1] += float(b["predicted"]) * n
+        acc[2] += float(b["observed"]) * n
+    return [{"bin": k, "games": n, "predicted": p / n, "observed": o / n} for k, (n, p, o) in sorted(pooled.items())]
+
+
 def cmd_uncertainty(store, cfg, args):
     from ..mc_validation import metrics as mc_metrics
     from ..model import get_metrics
@@ -69,6 +84,7 @@ def cmd_uncertainty(store, cfg, args):
         ml_bins += (m.get("binary_no_tie") or {}).get("calibration") or []
         for line in (m.get("total_lines") or {}).values():
             total_bins += (line or {}).get("calibration") or []
+    ml_bins, total_bins = _merge_bins(ml_bins), _merge_bins(total_bins)
     if ml_bins:
         p = half_width_from_calibration(ml_bins, "MC", "moneyline",
                                         f"mc_validation reconstructions, seasons {seasons} (no-tie binary bins)")
@@ -116,10 +132,10 @@ def cmd_label(store, cfg, args):
                 tick = D(c["tick_size"])
                 if view.best_ask is not None:
                     for k in cfg.grid_entry_ticks_below_ask:
-                        for tt in cfg.grid_target_ticks_above_entry:
-                            for ss in cfg.grid_stop_ticks_below_entry:
+                        for tt in cfg.grid_target_offsets:
+                            for ss in cfg.grid_stop_offsets:
                                 entry = view.best_ask - tick * k
-                                target, stop = entry + tick * tt, entry - tick * ss
+                                target, stop = entry + D(tt), entry - D(ss)
                                 if not D(0) < stop < entry < target < D(1):
                                     continue
                                 plan = TradePlan(

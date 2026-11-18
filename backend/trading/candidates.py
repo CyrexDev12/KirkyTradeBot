@@ -154,10 +154,13 @@ def evaluate(inp: CandidateInput, cfg: StrategyConfig, theta: Decimal, estimator
             continue
         cost = all_in_cost(entry, theta)
         gb_margin, mc_margin = inp.gb.lower - cost, inp.mc.lower - cost
-        for t in cfg.grid_target_ticks_above_entry:
-            for s in cfg.grid_stop_ticks_below_entry:
-                target, stop = entry + tick * t, entry - tick * s
-                combo = Combo(entry, target, stop, bucket(spec.market_type, cfg.hold_policy, entry, target, stop, tick),
+        for t in cfg.grid_target_offsets:
+            for s in cfg.grid_stop_offsets:
+                target, stop = entry + D(t), entry - D(s)
+                if not (on_tick(target, tick) and on_tick(stop, tick)):
+                    d.reject("PLAN_INVALID_FOR_BOOK", f"target/stop not on the {tick} tick grid")
+                    continue
+                combo = Combo(entry, target, stop, bucket(spec.market_type, cfg.hold_policy, entry, target, stop),
                               cost, gb_margin, mc_margin, None)
                 d.combos.append(combo)
                 # 5. Both models support the SAME selected contract at this entry after costs.

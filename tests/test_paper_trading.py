@@ -278,7 +278,7 @@ def test_week_end_equity_includes_open_positions(engine):
 EVENT = {"id": "1", "startTime": KICK.isoformat(), "teams": [{"abbreviation": "hou"}, {"abbreviation": "ind"}],
          "markets": [{"id": "mk", "slug": "nfl-ind-hou", "marketType": "moneyline",
                       "sportsMarketType": "football_team_full_game_winner", "active": True, "closed": False,
-                      "tickSize": "0.01", "quantityIncrement": "1", "minimumQuantity": "1",
+                      "orderPriceMinTickSize": 0.0025, "minimumTradeQty": 0.01, "feeCoefficient": 0.095,
                       "description": "Overtime is included. If there is a tie, each side settles at $0.50.",
                       "marketSides": [{"long": True, "team": {"abbreviation": "ind", "ordering": "away"}},
                                       {"long": False, "team": {"abbreviation": "hou", "ordering": "home"}}]}]}
@@ -294,6 +294,8 @@ def ml_match(event=EVENT, game=GAME):
 def test_contract_mapping_orientation_and_rejections():
     spec = moneyline_spec(GAME, ml_match(), "IND")
     assert spec.selected_side == "YES" and spec.tie_payout == D("0.5") and spec.increments_verified
+    # Live Polymarket US fields (2026-11-17): 0.0025 tick, 0.01 minimum, no step field -> whole contracts.
+    assert spec.tick_size == D("0.0025") and spec.quantity_step == 1 and spec.min_quantity == 1
     assert moneyline_spec(GAME, ml_match(), "HOU").selected_side == "NO"
     with pytest.raises(MappingError) as exc:
         moneyline_spec(GAME, ml_match(), "KC")
@@ -356,13 +358,13 @@ def examples(bucket_key, n_games=40, ret="0.25", weeks=8, label="TARGET"):
     return rows
 
 
-def grid_examples(ask=D("0.15"), ret="0.25"):
+def grid_examples(ask=D("0.15"), ret="0.25", tick=D("0.0025")):
     out = []
     for k in CFG.grid_entry_ticks_below_ask:
-        for t in CFG.grid_target_ticks_above_entry:
-            for s in CFG.grid_stop_ticks_below_entry:
-                e = ask - D("0.01") * k
-                out += examples(bucket("moneyline", CFG.hold_policy, e, e + D("0.01") * t, e - D("0.01") * s), ret=ret)
+        for t in CFG.grid_target_offsets:
+            for s in CFG.grid_stop_offsets:
+                e = ask - tick * k
+                out += examples(bucket("moneyline", CFG.hold_policy, e, e + D(t), e - D(s)), ret=ret)
     return out
 
 
@@ -642,3 +644,43 @@ def test_paper_api_endpoints(tmp_path, monkeypatch):
                     headers={"X-Paper-Operator-Token": "secret"})
     assert r.status_code == 200 and client.get("/api/paper/account").json()["paused"]
     assert client.get("/api/paper/why-no-trades").json()["readiness"]["path_examples"] == 0
+
+
+# ------------------------------------------------- live schema regression
+def test_live_polymarket_capture_maps_with_real_field_names():
+    """Fields captured from Polymarket US on 2026-11-18 (tests/fixtures)."""
+    import json
+    from backend.markets import match_event, match_total_markets
+    cap = json.loads((Path(__file__).parent / "fixtures/polymarket_capture_2026-11-18.json").read_text())
+    ml_defaults, tot = cap["market_defaults"]["moneyline"], cap["market_defaults"]["total"]
+    ev_id, start, away, home, ml_slug, tot_slug, line = cap["events"][6]  # MIA at BUF
+    ml = {"slug": ml_slug, "active": True, "closed": False, "marketType": "moneyline",
+          "sportsMarketType": "football_team_full_game_winner", **ml_defaults,
+          "marketSides": [{"long": True, "team": {"abbreviation": away, "ordering": "away"}},
+                          {"long": False, "team": {"abbreviation": home, "ordering": "home"}}]}
+    total = {"slug": tot_slug, "line": line, "active": True, "closed": False, "marketType": "totals",
+             "sportsMarketType": "football_team_full_game_total", "orderPriceMinTickSize": tot["orderPriceMinTickSize"],
+             "minimumTradeQty": tot["minimumTradeQty"],
+             "description": f"... combine for over {line} points in the game. Overtime is included if played.",
+             "marketSides": [{"long": True, "description": "Over"}, {"long": False, "description": "Under"}]}
+    event = {"id": ev_id, "startTime": start, "teams": [{"abbreviation": away}, {"abbreviation": home}],
+             "markets": [ml, total]}
+    game = {"game_id": "2026_11_MIA_BUF", "season": 2026, "week": 11, "home": "BUF", "away": "MIA",
+            "kickoff": "2026-11-22T18:00:00+00:00"}
+    buf = moneyline_spec(game, match_event(game, [event]), "BUF")
+    assert (buf.selected_side, buf.tick_size, buf.quantity_step, buf.tie_payout) == ("NO", D("0.0025"), 1, D("0.5"))
+    over = total_spec(game, match_total_markets(game, event)[0], "over")
+    assert over.selected_side == "YES" and over.tick_size == D("0.005")
+    transact, bids, offers = cap["books"][ml_slug]
+    book = parse_book(ml_slug, {"marketData": {"state": "MARKET_STATE_OPEN", "transactTime": transact,
+                                               "bids": [{"px": {"value": p}, "qty": q} for p, q in bids],
+                                               "offers": [{"px": {"value": p}, "qty": q} for p, q in offers]}}, T0)
+    view = selected_view(book, "NO")  # Bills = 1 - Dolphins book
+    assert view.best_ask == D("0.92") and view.best_bid == D("0.915")
+    # Polymarket listed PIT at PHI with startTime 18:00Z while its schedule kickoff is 21:25Z: never matched.
+    pit = cap["events"][7]
+    pit_event = {"id": pit[0], "startTime": pit[1], "teams": [{"abbreviation": pit[2]}, {"abbreviation": pit[3]}],
+                 "markets": [{**ml, "slug": pit[4], "marketSides": [
+                     {"long": True, "team": {"abbreviation": "pit", "ordering": "away"}},
+                     {"long": False, "team": {"abbreviation": "phi", "ordering": "home"}}]}]}
+    assert match_event({**game, "home": "PHI", "away": "PIT", "kickoff": "2026-11-22T21:25:00+00:00"}, [pit_event]) is None

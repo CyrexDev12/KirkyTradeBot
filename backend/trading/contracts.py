@@ -23,7 +23,7 @@ SETTLEMENT_RULE_TOTAL = "total-full-game-ot-half-point-v1"
 # captured responses; a market whose increments are unknown cannot qualify.
 TICK_FIELDS = ("tickSize", "minimumTickSize", "orderPriceMinTickSize", "priceIncrement")
 QTY_STEP_FIELDS = ("quantityIncrement", "qtyIncrement", "lotSize")
-MIN_QTY_FIELDS = ("minimumQuantity", "minQty", "minOrderSize")
+MIN_QTY_FIELDS = ("minimumTradeQty", "minimumQuantity", "minQty", "minOrderSize")
 
 
 class MappingError(ValueError):
@@ -79,14 +79,28 @@ def _first_decimal(market: dict, keys) -> Decimal | None:
     return None
 
 
+def _quantities(market: dict) -> tuple[Decimal | None, Decimal | None]:
+    """Quantity step and minimum.
+
+    Polymarket US NFL markets (observed 2026-11-17) publish ``minimumTradeQty``
+    (0.01) but no explicit increment field. Whole contracts are always valid
+    multiples of a fractional minimum, so the paper account trades whole
+    contracts in that case instead of assuming a fractional step.
+    """
+    step = _first_decimal(market, QTY_STEP_FIELDS)
+    minimum = _first_decimal(market, MIN_QTY_FIELDS)
+    if step is None and minimum is not None and minimum <= 1 and (Decimal(1) / minimum) % 1 == 0:
+        return Decimal(1), Decimal(1)
+    return step, minimum
+
+
 def _base(game: dict, market: dict, event: dict) -> dict:
+    step, minimum = _quantities(market)
     return dict(venue="polymarket_us", market_slug=market["slug"], market_id=market.get("id"),
                 event_id=str(event.get("id")) if event.get("id") is not None else None,
                 game_id=game["game_id"], season=int(game["season"]), week=int(game["week"]),
                 home=game["home"], away=game["away"], kickoff=utc(game["kickoff"]),
-                tick_size=_first_decimal(market, TICK_FIELDS),
-                quantity_step=_first_decimal(market, QTY_STEP_FIELDS),
-                min_quantity=_first_decimal(market, MIN_QTY_FIELDS))
+                tick_size=_first_decimal(market, TICK_FIELDS), quantity_step=step, min_quantity=minimum)
 
 
 def moneyline_spec(game: dict, match: dict | None, team: str) -> ContractSpec:

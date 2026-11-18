@@ -59,9 +59,12 @@ class StrategyConfig:
     # Fee profile: explicitly chosen conservative small-account taker profile.
     fee_profile_id: str = "polymarket-us-taker-lowest-volume-2026-11-14"
     # Frozen candidate grid (in ticks) and ranking objective identity.
+    # Entry offsets are venue ticks below the current selected ask; target and stop
+    # distances are in price (dollars per $1 contract) so the grid does not change
+    # meaning when a venue's tick size changes (Polymarket US NFL markets use 0.0025).
     grid_entry_ticks_below_ask: tuple = (0, 1, 2)
-    grid_target_ticks_above_entry: tuple = (5, 10, 15)
-    grid_stop_ticks_below_entry: tuple = (3, 4, 6)
+    grid_target_offsets: tuple = ("0.05", "0.10", "0.15")
+    grid_stop_offsets: tuple = ("0.03", "0.04", "0.06")
     ranking_objective: str = "lower_bound_net_pnl_per_committed_dollar-v1"
     rating_version: str = "rating-v1-dev-defaults"
     # Market-path readiness policy. Not a claim that these counts prove anything.

@@ -45,6 +45,36 @@ python -m backend.trading.worker                    # recorder + engine + weekly
 python -m bot.discord_bot                           # bot (also needs NFL_PAPER_OPERATOR_TOKEN)
 ```
 
+## Dry run without a Discord token
+
+`scripts/paper_dry_run.py` runs the real worker loop, using:
+
+- the NFLverse schedule,
+- your trained GB model and the MC,
+- the slate/report/plan/activation jobs,
+- the `/api/paper` routes,
+- the bot's publisher and formatters.
+
+It replays a saved Polymarket capture (`tests/fixtures/polymarket_capture_2026-11-18.json` by default) instead of calling the network, and prints each Discord post instead of sending it:
+
+```bash
+export NFL_DATA_DIR=/tmp/nfl NFL_PAPER_DB=/tmp/nfl/paper.sqlite3   # scratch copies, never your live ones
+python -m backend.prepare
+python -m backend.trading.cli uncertainty --mc-seasons 2024,2025,2026
+python scripts/paper_dry_run.py
+```
+
+Result of the run on the 2026-11-18 capture (week 11, 13 games, 50 candidate contracts): **0 trades**.
+
+| Count | Reason | Why |
+| --- | --- | --- |
+| 21 | `NO_MODEL_CONSENSUS` | Both models' lower bounds did not clear the price plus 2¢ |
+| 22 | `UNSUPPORTED_UNCERTAINTY` | Totals: GB has no total-line calibration |
+| 6 | `NO_LISTED_MARKET` | Polymarket's `startTime` for PIT@PHI and JAX@NYG disagreed with both the schedule and the markets' own descriptions |
+| 1 | `INSUFFICIENT_EXECUTION_HISTORY` | TB moneyline cleared both models at 26¢, then stopped for lack of path history |
+
+The account report and plan each posted once, and a repeated publish sent nothing.
+
 ## Discord commands
 
 `/picks`, `/trade <id>`, `/account`, `/performance`, `/why-no-trades`, `/health`. Operators (Manage Server) also get `/paper-pause`, `/paper-resume` and `/paper-channels set`. Pausing stops new entries only. Exit monitoring, deadlines and settlement keep running.
@@ -103,8 +133,15 @@ Censored paths are kept. They count in coverage, the point estimate books them a
 
 - **Implemented and tested:** everything in the table above, plus the 35 tests in `tests/test_paper_trading.py`, which cover every case in the brief's section 18.
 - **Collecting data:** book snapshots and market-path examples.
-- **Not verified against live endpoints:**
-  - Polymarket US field names for tick size, quantity step, market states and the settlement schema. Contracts with unknown increments are rejected with `UNKNOWN_INCREMENTS`.
+- **Checked against live Polymarket US responses (2026-11-18):**
+  - `orderPriceMinTickSize`: 0.0025 for moneylines, 0.005 for totals. The target/stop grid is therefore defined in price, not ticks.
+  - `minimumTradeQty`: 0.01, with no step field. The paper account trades whole contracts.
+  - `feeCoefficient`: 0.095.
+  - `MARKET_STATE_OPEN`, and the book's `px.value`/`qty` levels.
+  - Moneyline `long` = away team; the $0.50 tie clause; the total-line description.
+- **Not verified:**
+  - Non-open market state names.
+  - The settlement endpoint schema.
   - Exact fee aggregation beyond the dashboard convention.
 - **Unsupported:**
   - Passive queue fills.

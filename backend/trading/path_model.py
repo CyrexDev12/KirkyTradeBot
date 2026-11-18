@@ -34,12 +34,12 @@ CENSORED, NO_FILL, MIXED = "CENSORED", "NO_FILL", "MIXED"
 EXIT_LABELS = ("TARGET", "STOP", "TIME", "SETTLEMENT")
 
 
-def bucket(market_type: str, hold_policy: str, entry: Decimal, target: Decimal, stop: Decimal,
-           tick: Decimal = Decimal("0.01")) -> str:
+def bucket(market_type: str, hold_policy: str, entry: Decimal, target: Decimal, stop: Decimal) -> str:
+    """Analogue bucket: market type, holding profile, 5-cent entry band, target/stop distance in cents."""
     entry_band = (entry / Decimal("0.05")).to_integral_value(ROUND_FLOOR) * Decimal("0.05")
-    t = int((target - entry) / tick)
-    s = int((entry - stop) / tick)
-    return f"{market_type}|{hold_policy}|e{entry_band:.2f}|t{t}|s{s}"
+    t = ((target - entry) * 100).quantize(Decimal("0.01"))
+    s = ((entry - stop) * 100).quantize(Decimal("0.01"))
+    return f"{market_type}|{hold_policy}|e{entry_band:.2f}|t{t.normalize()}c|s{s.normalize()}c"
 
 
 def label_path(plan: TradePlan, snapshots, cfg: StrategyConfig, settlement_payout: Decimal | None = None,
@@ -93,7 +93,7 @@ def label_path(plan: TradePlan, snapshots, cfg: StrategyConfig, settlement_payou
     realized = pos.realized if pos and not censored_reason else None
     return {"trade_id": plan.trade_id, "game_id": plan.game_id, "season": plan.season, "week": plan.week,
             "bucket": bucket(plan.market_type, plan.hold_policy, plan.entry_limit, plan.target_limit,
-                             plan.stop_trigger, plan.tick_size),
+                             plan.stop_trigger),
             "label": label, "censored_reason": censored_reason, "filled_quantity": str(filled),
             "planned_quantity": str(plan.quantity), "committed": str(committed),
             "realized": str(realized) if realized is not None else None,
