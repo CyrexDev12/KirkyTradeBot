@@ -77,7 +77,7 @@ $archive = Join-Path $staging 'nfl-fair-value.tar.gz'
 if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
 Copy-Remote $archive 'nfl-upload/app.tar.gz'
 Copy-Remote (Resolve-Path -LiteralPath $TokenFile).Path 'nfl-upload/token'
-Invoke-Ssh 'set -e; tar -xzf ~/nfl-upload/app.tar.gz -C ~/nfl-fair-value; cd ~/nfl-fair-value; mkdir -p .secrets; chmod 700 .secrets; sudo install -o 10001 -g 10001 -m 0400 ~/nfl-upload/token .secrets/discord_token.txt; rm ~/nfl-upload/token; sudo docker compose up --build -d --wait --wait-timeout 900'
+Invoke-Ssh 'set -e; tar -xzf ~/nfl-upload/app.tar.gz -C ~/nfl-fair-value; cd ~/nfl-fair-value; mkdir -p .secrets; chmod 700 .secrets; sudo install -o 10001 -g 10001 -m 0400 ~/nfl-upload/token .secrets/discord_token.txt; rm ~/nfl-upload/token; test -s .secrets/paper_operator_token.txt || openssl rand -hex 32 | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin .secrets/paper_operator_token.txt; sudo docker compose up --build -d --wait --wait-timeout 900'
 Invoke-Ssh 'cd ~/nfl-fair-value && sudo docker compose ps'
 Write-Host "Deployed in $Location. Use /alerts setup in Discord to choose the channel."
 Write-Host "Dashboard tunnel: ssh -i $privateKey -L 8000:127.0.0.1:8000 $remote"

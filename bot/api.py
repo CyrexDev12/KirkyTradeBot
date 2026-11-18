@@ -1,11 +1,21 @@
+import os
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 
 
+def operator_token():
+    path = os.getenv("NFL_PAPER_OPERATOR_TOKEN_FILE")
+    if path and Path(path).exists():
+        return Path(path).read_text(encoding="utf-8-sig").strip() or None
+    return os.getenv("NFL_PAPER_OPERATOR_TOKEN") or None
+
+
 class PredictionAPI:
-    def __init__(self, base_url):
+    def __init__(self, base_url, token=None):
         self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30)
+        self.token = token if token is not None else operator_token()
 
     async def get(self, path, **params):
         response = await self.client.get(path, params={k: v for k, v in params.items() if v is not None})
@@ -20,6 +30,31 @@ class PredictionAPI:
 
     async def forecast(self, game_id):
         return await self.get(f"/api/games/{quote(game_id, safe='')}/forecast")
+
+    async def paper(self, path):
+        return await self.get("/api/paper" + path)
+
+    def _operator_headers(self):
+        if not self.token:
+            raise PermissionError("NFL_PAPER_OPERATOR_TOKEN is not configured for the bot")
+        return {"X-Paper-Operator-Token": self.token}
+
+    async def paper_operator(self, path, body):
+        response = await self.client.post("/api/paper" + path, json=body, headers=self._operator_headers())
+        response.raise_for_status()
+        return response.json()
+
+    async def paper_outbox(self):
+        response = await self.client.get("/api/paper/outbox/pending", headers=self._operator_headers())
+        response.raise_for_status()
+        return response.json()
+
+    async def paper_ack(self, publication_id, revision, message_id, error):
+        response = await self.client.post(f"/api/paper/outbox/{quote(publication_id, safe='')}/ack",
+                                          json={"revision": revision, "message_id": message_id, "error": error},
+                                          headers=self._operator_headers())
+        response.raise_for_status()
+        return response.json()
 
     async def close(self):
         await self.client.aclose()
