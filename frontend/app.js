@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = {meta:null, data:null, metrics:null, totalMetrics:null, season:null, week:null, filter:'all', sort:'kickoff', view:'cards', search:'', quantity:100, busy:false, pending:null};
+const state = {meta:null, data:null, metrics:null, totalMetrics:null, season:null, week:null, model:'existing', filter:'all', sort:'kickoff', view:'cards', search:'', quantity:100, busy:false};
 const pct = (n, digits=1) => n == null || !Number.isFinite(n) ? '—' : `${(n*100).toFixed(digits)}%`;
 const pp = (n) => n == null || !Number.isFinite(n) ? '—' : `${n >= 0 ? '+' : ''}${(n*100).toFixed(1)} pp`;
 const money = (n) => n == null || !Number.isFinite(n) ? '—' : `$${n.toFixed(3)}`;
@@ -18,39 +18,86 @@ function totalsDetails(a){const p=a.total_prediction,t=a.totals,featured=t?.feat
 function totalsValidation(m){if(!m)return '';return `<div class="detail-section"><h3>Total-points model · season walk-forward</h3><div class="validation-grid"><div class="validation-box"><span>MAE · POINTS</span><b>${points(m.aggregate?.mae)}</b></div><div class="validation-box"><span>RMSE · POINTS</span><b>${points(m.aggregate?.rmse)}</b></div><div class="validation-box"><span>80% INTERVAL COVERAGE</span><b>${pct(m.aggregate?.interval_coverage,0)}</b></div></div><p class="detail-note">${safe(m.method)} ${safe(m.note)}</p><div class="compare-head"><span>SEASON</span><span style="text-align:center">MAE · RMSE</span><span style="text-align:right">GAMES</span></div>${(m.seasons||[]).map(s=>`<div class="compare-row"><span>${s.season}</span><label>${points(s.mae)} · ${points(s.rmse)}</label><span>${s.games}</span></div>`).join('')}</div>`;}
 function showAlert(message) { const el=$('alert');el.textContent=message || '';el.classList.toggle('hidden',!message); }
 function setBusy(busy) {state.busy=busy;$('refresh').disabled=busy;$('refresh').innerHTML=busy?'<span class="refresh-symbol">↻</span> Refreshing…':'<span class="refresh-symbol">↻</span> Refresh quotes';}
-async function request(url) {const res=await fetch(url,{cache:'no-store'});if(!res.ok){let msg=`HTTP ${res.status}`;try{msg=(await res.json()).detail||msg;}catch{}throw Error(msg);}return res.json();}
+async function request(url,signal) {const res=await fetch(url,{cache:'no-store',signal});if(!res.ok){let msg=`HTTP ${res.status}`;try{msg=(await res.json()).detail||msg;}catch{}throw Error(msg);}return res.json();}
 function populateMeta(){const m=state.meta;$('season').innerHTML=m.seasons.map(s=>`<option value="${s}">${s}</option>`).join('');state.season=m.default_season;state.week=m.default_week;$('season').value=state.season;populateWeeks();}
 function populateWeeks(){const weeks=state.meta.weeks[String(state.season)]||[];$('week').innerHTML=weeks.map(w=>`<option value="${w}">Week ${w}</option>`).join('');if(!weeks.includes(state.week))state.week=weeks[0];$('week').value=state.week;$('prev-week').disabled=weeks.indexOf(state.week)<=0;$('next-week').disabled=weeks.indexOf(state.week)>=weeks.length-1;}
+let activeRequest;
 async function load(force=false){
-  if(state.busy){state.pending=force||state.pending||false;return;}
+  if (!state.meta) return;
+  activeRequest?.abort();
+  const ctrl = new AbortController();
+  activeRequest = ctrl;
   setBusy(true);showAlert('');
-  const selected={season:state.season,week:state.week,quantity:state.quantity};
-  const current=()=>selected.season===state.season&&selected.week===state.week&&selected.quantity===state.quantity;
+  const selected={season:state.season,week:state.week,quantity:state.quantity,model:state.model};
+  const current=()=>!ctrl.signal.aborted;
   try{
-    if(!state.data||state.data.season!==selected.season||state.data.week!==selected.week){
+    if(!state.data||state.data.season!==selected.season||state.data.week!==selected.week||state.data.model!==selected.model){
+      state.data=null;
+      $('board').innerHTML='<div class="loading">Loading matchup forecasts…</div>';
       const base=new URLSearchParams({season:selected.season,week:selected.week});
-      const [schedule,preds,totalPreds]=await Promise.all([request('/api/games?'+base),request('/api/predictions?'+base),request('/api/total-predictions?'+base)]);
+      const get=path=>request(path+'?'+base,ctrl.signal);
+      const historical=selected.model!=='monte_carlo';
+      const [schedule,preds,totalPreds,mc]=await Promise.all([get('/api/games'),historical&&get('/api/predictions'),
+        historical&&get('/api/total-predictions'),selected.model!=='existing'&&get('/api/monte-carlo/predictions')]);
       if(current()){
-        state.data={season:selected.season,week:selected.week,games:schedule.games.map(g=>({...g,prediction:preds.predictions[g.game_id],total_prediction:totalPreds.predictions[g.game_id],market:null,totals:null,home_value:null,away_value:null})),model_error:preds.error,market_error:null,market_fetched_at:null};
+        state.data={...selected,games:schedule.games.map(g=>({...g,prediction:preds?.predictions?.[g.game_id],total_prediction:totalPreds?.predictions?.[g.game_id],
+          monte_carlo:mc?.predictions?.[g.game_id],market:null,totals:null,home_value:null,away_value:null})),model_error:preds?.error,market_error:null,market_fetched_at:null};
         render();
         $('freshness').textContent='Refreshing live market quotes…';
       }
     }
     const q=new URLSearchParams({...selected,refresh:force});
-    const result=await request('/api/dashboard?'+q);
-    if(current()){state.data=result;render();}
+    const result=await request('/api/dashboard?'+q,ctrl.signal);
+    if(current()){state.data={...result,model:selected.model};render();}
   }catch(err){
     if(current()){
       showAlert(`Unable to load dashboard: ${err.message}`);
       if(!state.data)$('board').innerHTML='<div class="empty">No live data available. Check the server and data preparation status.</div>';
     }
   }finally{
-    setBusy(false);
-    if(state.pending!==null){const next=state.pending;state.pending=null;load(next);}
+    if(current())setBusy(false);
   }
 }
-function filtered(){let games=[...(state.data?.games||[])];if(state.filter==='upcoming')games=games.filter(g=>g.status==='Upcoming');if(state.filter==='markets')games=games.filter(g=>g.market?.outcomes||g.totals?.featured);if(state.search)games=games.filter(g=>`${g.home_team.name} ${g.home} ${g.away_team.name} ${g.away}`.toLowerCase().includes(state.search));const score={edge:g=>bestEdge(g),difference:g=>Math.max(Math.abs(g.home_value?.raw_difference??0),Math.abs(g.away_value?.raw_difference??0)),probability:g=>Math.max(g.prediction?.home_probability??0,g.prediction?1-g.prediction.home_probability:0)};if(state.sort==='kickoff')games.sort((a,b)=>new Date(a.kickoff)-new Date(b.kickoff));else games.sort((a,b)=>(score[state.sort](b)||-Infinity)-(score[state.sort](a)||-Infinity));return games;}
-function render(){if(!state.data)return;const d=state.data;const games=d.games;const withMarket=games.filter(g=>g.market?.outcomes||g.totals?.featured).length;const edges=games.map(bestEdge).filter(Number.isFinite);$('stat-games').textContent=games.length;$('stat-markets').textContent=`${withMarket}/${games.length}`;$('stat-edge').textContent=edges.length?pct(Math.max(...edges)):'—';$('stat-brier').textContent=state.totalMetrics?.aggregate?.mae!=null?`${points(state.totalMetrics.aggregate.mae)} pts`:'—';$('week-title').textContent=`/ ${d.season} · WEEK ${String(d.week).padStart(2,'0')}`;$('freshness').textContent=d.market_fetched_at?`Quotes checked ${when(d.market_fetched_at,{weekday:undefined,month:undefined,day:undefined})}`:'Market unavailable';if(d.model_error)showAlert(d.model_error);else if(d.total_model_error)showAlert(d.total_model_error);else if(d.market_error)showAlert(d.market_error);else if(d.total_market_error)showAlert(d.total_market_error);else showAlert('');const list=filtered();$('board').innerHTML=list.length?(state.view==='cards'?`<div class="cards">${list.map(card).join('')}</div>`:table(list)):'<div class="empty">No games match these filters.</div>';$('card-view').classList.toggle('selected',state.view==='cards');$('table-view').classList.toggle('selected',state.view==='table');}
+function filtered() {
+  let games = [...(state.data?.games || [])];
+  if (state.filter === 'upcoming') games = games.filter(g => g.status === 'Upcoming');
+  if (state.filter === 'markets') games = games.filter(g => g.market?.outcomes || g.totals?.featured);
+  if (state.search) games = games.filter(g => [g.home_team.name,g.home,g.away_team.name,g.away].join(' ').toLowerCase().includes(state.search));
+  function score(g) {
+    if (state.sort === 'edge') return bestEdge(g);
+    if (state.sort === 'difference') {
+      if (state.model === 'compare') return mcComparison(g) == null ? -Infinity : Math.abs(mcComparison(g));
+      return Math.max(Math.abs(g.home_value?.raw_difference ?? 0), Math.abs(g.away_value?.raw_difference ?? 0));
+    }
+    if (state.model !== 'existing') return Math.max(g.monte_carlo?.probability_home_win ?? -Infinity, g.monte_carlo?.probability_away_win ?? -Infinity);
+    return g.prediction ? Math.max(g.prediction.home_probability,1-g.prediction.home_probability) : -Infinity;
+  }
+  return state.sort === 'kickoff' ? games.sort((a,b)=>new Date(a.kickoff)-new Date(b.kickoff)) : games.sort((a,b)=>score(b)-score(a));
+}
+function render() {
+  if (!state.data) return;
+  const d=state.data, games=d.games, mc=state.model!=='existing';
+  const available=games.filter(g=>g.monte_carlo?.status==='available');
+  const withMarket=games.filter(g=>g.market?.outcomes || g.totals?.featured).length;
+  const edges=games.map(bestEdge).filter(Number.isFinite);
+  $('stat-games').textContent=games.length;
+  $('stat-markets').textContent=`${withMarket}/${games.length}`;
+  $('edge-label').textContent=mc?'MC FORECASTS':'TOP EST. NET EDGE';
+  $('edge-note').textContent=mc?'Eligible matchups':'At selected trade size';
+  $('stat-edge').textContent=mc?`${available.length}/${games.length}`:(edges.length?pct(Math.max(...edges)):'—');
+  $('model-stat-label').textContent=mc?'SIMULATIONS / GAME':'TOTALS MODEL MAE';
+  $('model-stat-note').textContent=mc?'Paired final scores':'Season walk-forward · points';
+  const drawCounts=[...new Set(available.map(g=>g.monte_carlo.simulation_count))];
+  $('stat-brier').textContent=mc?(drawCounts.map(n=>n.toLocaleString()).join(' / ')||'—'):
+    (state.totalMetrics?.aggregate?.mae!=null?`${points(state.totalMetrics.aggregate.mae)} pts`:'—');
+  $('week-title').textContent=`/ ${d.season} · WEEK ${String(d.week).padStart(2,'0')}`;
+  $('freshness').textContent=d.market_fetched_at?`Quotes checked ${when(d.market_fetched_at,{weekday:undefined,month:undefined,day:undefined})}`:'Market unavailable';
+  showAlert(d.model_error || d.total_model_error || d.market_error || d.total_market_error || '');
+  const list=filtered(), cardRenderer=mc?mcCard:card, tableRenderer=mc?mcTable:table;
+  $('board').innerHTML=list.length?(state.view==='cards'?`<div class="cards">${list.map(cardRenderer).join('')}</div>`:tableRenderer(list)):'<div class="empty">No games match these filters.</div>';
+  $('card-view').classList.toggle('selected',state.view==='cards');
+  $('table-view').classList.toggle('selected',state.view==='table');
+}
 function teamBlock(t,side){return `<div class="team ${side}"><img class="team-logo" src="${safe(t.logo)}" alt=""><div><div class="team-name">${safe(t.name.split(' ').slice(-1)[0])}</div><div class="team-abbr">${safe(t.abbr)} · ${side==='home'?'HOME':'AWAY'}</div></div></div>`;}
 function sideValues(g){const hp=g.prediction?.home_probability;return {home:hp??null,away:hp==null?null:1-hp,hm:g.market?.outcomes?.[g.home]||null,am:g.market?.outcomes?.[g.away]||null};}
 function card(g){const v=sideValues(g);const edge=bestEdge(g);const pill=edge===-Infinity?'NO EXECUTABLE EDGE':edge<=0?'NO POSITIVE EDGE':`${safe(bestSide(g)?.category||'Potential value').toUpperCase()} · ${safe(bestLabel(g)).toUpperCase()} · +${(edge*100).toFixed(1)} pp`;const pillTone=edge===-Infinity?'':tone(edge);const marketState=g.market?.status==='STALE'?'Stale market quote':g.market?.status==='REFERENCE_ONLY'?'Reference quote · depth unavailable':g.market?.outcomes?'':state.data?.market_fetched_at?'Market Unavailable':'Refreshing quotes';return `<article class="game-card"><div class="game-card-top"><span class="game-meta"><b>W${String(g.week).padStart(2,'0')}</b>${safe(onlyDate(g.kickoff))}</span><span class="status ${g.status.toLowerCase()}">${safe(g.status)}</span></div><div class="teams">${teamBlock(g.away_team,'away')}<span class="at">@</span>${teamBlock(g.home_team,'home')}</div><div class="game-metrics"><div class="metric-row"><span class="metric-label">${marketState||'PREGAME COMPARISON'}</span><span class="team-head">${g.away}</span><span class="team-head">${g.home}</span></div><div class="metric-row"><span class="metric-label">Market price</span><b>${pct(v.am?.display_price)}</b><b>${pct(v.hm?.display_price)}</b></div><div class="metric-row"><span class="metric-label">Model fair value</span><b>${pct(v.away)}</b><b>${pct(v.home)}</b></div><div class="metric-row"><span class="metric-label">Model − market</span><b class="${tone(g.away_value?.raw_difference)}">${pp(g.away_value?.raw_difference)}</b><b class="${tone(g.home_value?.raw_difference)}">${pp(g.home_value?.raw_difference)}</b></div><div class="metric-row"><span class="metric-label">Executable buy ask</span><b>${money(v.am?.ask)}</b><b>${money(v.hm?.ask)}</b></div><div class="metric-row"><span class="metric-label">Est. net edge · ${state.quantity} contracts</span><b class="${tone(g.away_value?.net_edge)}">${pp(g.away_value?.net_edge)}</b><b class="${tone(g.home_value?.net_edge)}">${pp(g.home_value?.net_edge)}</b></div></div>${totalBlock(g)}<div class="game-card-bottom"><span class="edge-pill ${pillTone}">${pill}</span><button class="detail-link" data-game="${safe(g.game_id)}">MATCHUP ANALYSIS ↗</button></div></article>`;}
@@ -61,7 +108,12 @@ function calibrationSvg(bins){const points=(bins||[]).map(c=>[Math.max(0,Math.mi
 async function openGame(id){$('modal').classList.remove('hidden');$('modal-content').innerHTML='<div class="loading">Loading matchup analysis…</div>';try{const a=await request(`/api/games/${encodeURIComponent(id)}/analysis?quantity=${state.quantity}`);const g=a.game;const hp=a.prediction?.home_probability;const ap=hp==null?null:1-hp;const h=a.home_metrics||{},aw=a.away_metrics||{},hq=a.market?.outcomes?.[g.home],aq=a.market?.outcomes?.[g.away];$('modal-content').innerHTML=`<div class="modal-kicker">MATCHUP INTELLIGENCE / ${safe(g.season)} WEEK ${safe(g.week)}</div><h2 class="modal-title">${safe(g.away_team.name)} <span class="subdued">@</span><br>${safe(g.home_team.name)}</h2><div class="modal-subtitle">${safe(when(g.kickoff))} · ${safe(g.status)} · ${safe(g.game_id)}</div><div class="detail-teams"><div class="detail-team"><img src="${safe(g.away_team.logo)}" alt=""><b>${safe(g.away_team.name)}</b><div class="record">AWAY · ${safe(aw.record||'—')}</div><div class="big"><span>MODEL FAIR VALUE</span>${pct(ap)}</div><div class="record">MARKET ${pct(aq?.display_price)} · ASK ${money(aq?.ask)}</div><div class="record ${tone(a.away_value?.net_edge)}">EST. NET EDGE ${pp(a.away_value?.net_edge)}</div></div><div class="detail-team"><img src="${safe(g.home_team.logo)}" alt=""><b>${safe(g.home_team.name)}</b><div class="record">HOME · ${safe(h.record||'—')}</div><div class="big"><span>MODEL FAIR VALUE</span>${pct(hp)}</div><div class="record">MARKET ${pct(hq?.display_price)} · ASK ${money(hq?.ask)}</div><div class="record ${tone(a.home_value?.net_edge)}">EST. NET EDGE ${pp(a.home_value?.net_edge)}</div></div></div><div class="detail-section"><h3>Probability comparison</h3><div class="bar-group">${bars(g.away_team.name,ap,aq?.display_price)}${bars(g.home_team.name,hp,hq?.display_price)}</div><p class="detail-note">Green: independent model. Blue: Polymarket display price. Buy edge uses order book depth and estimated taker fees.</p></div>${totalsDetails(a)}<div class="detail-section"><h3>Market microstructure</h3><div class="compare-head"><span>${safe(g.away)}</span><span style="text-align:center">QUOTE</span><span style="text-align:right">${safe(g.home)}</span></div>${compare('Best bid',aq?.bid,hq?.bid)}${compare('Best ask',aq?.ask,hq?.ask)}${compare('Last trade',aq?.last_trade,hq?.last_trade)}${compare('100-contract VWAP'.replace('100',String(state.quantity)),aq?.execution?.vwap,hq?.execution?.vwap)}<div class="validation-row"><span>Market ID / event ID</span><b>${safe(a.market?.market_id||'—')} / ${safe(a.market?.event_id||'—')}</b></div><div class="validation-row"><span>Market status</span><b>${safe(a.market?.status||'Unavailable')}</b></div><div class="validation-row"><span>Volume · contracts</span><b>${a.market?.volume_contracts?Number(a.market.volume_contracts).toLocaleString():'—'}</b></div></div><div class="detail-section"><h3>Pregame statistical inputs</h3><div class="compare-head"><span>${safe(g.away)}</span><span style="text-align:center">METRIC</span><span style="text-align:right">${safe(g.home)}</span></div>${compare('Offensive EPA / play',aw.off_epa,h.off_epa)}${compare('Defensive EPA allowed',aw.def_epa,h.def_epa)}${compare('Offensive success rate',aw.off_success,h.off_success)}${compare('Defensive success allowed',aw.def_success,h.def_success)}${compare('Passing EPA / play',aw.pass_epa,h.pass_epa)}${compare('Rushing EPA / play',aw.rush_epa,h.rush_epa)}${compare('Pass defense EPA allowed',aw.def_pass_epa,h.def_pass_epa)}${compare('Rush defense EPA allowed',aw.def_rush_epa,h.def_rush_epa)}${compare('Explosive play rate',aw.explosive,h.explosive)}${compare('QB dropback EPA',aw.qb_epa,h.qb_epa)}${compare('CPOE · percentage points',aw.cpoe,h.cpoe)}${compare('Pregame Elo',aw.elo,h.elo,0)}</div><div class="detail-section"><h3>Model explanation & provenance</h3><p class="detail-note">${safe(a.explanation)} Recent offensive EPA difference: ${numeric(a.model_features?.recent_off_epa_diff)}. Recent defensive EPA advantage: ${numeric(a.model_features?.recent_def_epa_diff)}. Rest difference: ${numeric(a.model_features?.home_rest_diff,0)} days. Opponent-strength difference: ${numeric(a.model_features?.sos_diff)}.</p><div class="validation-row"><span>Model version</span><b>${safe(a.model_version)}</b></div><div class="validation-row"><span>Prediction generated</span><b>${a.prediction?.generated_at?safe(when(a.prediction.generated_at)):'Historical reconstruction'}</b></div><div class="validation-row"><span>Market quote as of</span><b>${a.market?.updated_at?safe(when(a.market.updated_at)):'Unavailable'}</b></div><div class="validation-row"><span>Settlement basis</span><b>${a.market?'Full game incl. overtime':'—'}</b></div><p class="detail-note">${a.prediction?.kind==='walk_forward_reconstruction'?'Historical probability reconstructed from a season walk-forward model. It was not archived at the time of the game.':''} ${a.market?.settlement||''}</p></div>`;}catch(err){$('modal-content').innerHTML=`<div class="alert">${safe(err.message)}</div>`;}}
 async function showValidation(){if(!state.metrics){try{state.metrics=await request('/api/model/metrics');state.totalMetrics=await request('/api/model/totals-metrics');render();}catch(err){showAlert(`Model validation unavailable: ${err.message}`);return;}}const m=state.metrics;$('modal').classList.remove('hidden');$('modal-content').innerHTML=`<div class="modal-kicker">MODEL VALIDATION / ${safe(m.model_version)}</div><h2 class="modal-title">Walk-forward<br>performance.</h2><div class="modal-subtitle">Generated ${safe(when(m.generated_at))}</div><div class="validation-grid"><div class="validation-box"><span>BRIER SCORE</span><b>${numeric(m.aggregate?.brier,3)}</b></div><div class="validation-box"><span>LOG LOSS</span><b>${numeric(m.aggregate?.log_loss,3)}</b></div><div class="validation-box"><span>ACCURACY</span><b>${pct(m.aggregate?.accuracy)}</b></div></div><p class="detail-note">${safe(m.method)}. ${safe(m.note)}</p><div class="detail-section"><h3>By test season</h3><div class="compare-head"><span>SEASON</span><span style="text-align:center">BRIER · LOG LOSS</span><span style="text-align:right">GAMES</span></div>${(m.seasons||[]).map(s=>`<div class="compare-row"><span>${s.season}</span><label>${numeric(s.brier,3)} · ${numeric(s.log_loss,3)}</label><span>${s.games}</span></div>`).join('')}</div><div class="detail-section"><h3>Calibration curve</h3>${calibrationSvg(m.calibration)}<p class="detail-note">Dashed line is perfect calibration; green is observed win rate in each prediction bin.</p><div class="compare-head"><span>PREDICTED</span><span style="text-align:center">OBSERVED</span><span style="text-align:right">GAMES</span></div>${(m.calibration||[]).map(c=>`<div class="compare-row"><span>${pct(c.predicted)}</span><label>${pct(c.observed)}</label><span>${c.games}</span></div>`).join('')}</div>${totalsValidation(state.totalMetrics)}<p class="detail-note">Trading performance is unavailable without timestamped historical exchange quotes. Prediction accuracy alone does not demonstrate a profitable strategy.</p>`;}
 function closeModal(){$('modal').classList.add('hidden');}
-document.addEventListener('click',e=>{const game=e.target.closest('[data-game]');if(game)openGame(game.dataset.game);if(e.target.closest('[data-close]'))closeModal();});
+document.addEventListener('click',e=>{
+  const game=e.target.closest('[data-game]');
+  if(game && state.model==='existing') openGame(game.dataset.game);
+  else if(game) openMcGame(state.data.games.find(g=>g.game_id===game.dataset.game));
+  if(e.target.closest('[data-close]'))closeModal();
+});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 $('season').addEventListener('change',()=>{state.season=Number($('season').value);state.week=state.meta.weeks[String(state.season)][0];populateWeeks();load();});
 $('week').addEventListener('change',()=>{state.week=Number($('week').value);populateWeeks();load();});
@@ -72,7 +124,18 @@ $('search').addEventListener('input',()=>{state.search=$('search').value.toLower
 $('sort').addEventListener('change',()=>{state.sort=$('sort').value;render();});
 document.querySelectorAll('[data-filter]').forEach(el=>el.addEventListener('click',()=>{state.filter=el.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('selected',x===el));render();}));
 $('card-view').addEventListener('click',()=>{state.view='cards';render();});$('table-view').addEventListener('click',()=>{state.view='table';render();});
-$('method-link').addEventListener('click',showValidation);$('rail-validation').addEventListener('click',showValidation);
+function validationForModel(){return state.model==='existing'?showValidation():showMcValidation();}
+$('method-link').addEventListener('click',validationForModel);$('rail-validation').addEventListener('click',validationForModel);
+$('forecast-model').addEventListener('change',()=>{
+  state.model=$('forecast-model').value;
+  state.sort='kickoff';
+  const options=$('sort').options;
+  options[1].disabled=state.model!=='existing';
+  options[2].disabled=state.model==='monte_carlo';
+  options[2].textContent=state.model==='compare'?'Largest model disagreement':'Largest model difference';
+  $('sort').value=state.sort;
+  load();
+});
 setInterval(()=>{$('clock').textContent=new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(new Date());},1000);
-setInterval(()=>{if(state.data&&!document.hidden)load();},45000);
+setInterval(()=>{if(state.data&&!state.busy&&!document.hidden)load();},45000);
 (async()=>{try{state.meta=await request('/api/meta');populateMeta();load();try{[state.metrics,state.totalMetrics]=await Promise.all([request('/api/model/metrics'),request('/api/model/totals-metrics')]);render();}catch{}}catch(err){showAlert(`NFL schedule unavailable: ${err.message}`);$('board').innerHTML='<div class="empty">Schedule could not be loaded.</div>';}})();

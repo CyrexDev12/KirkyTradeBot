@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 import asyncio
 import json
 import logging
@@ -14,6 +15,10 @@ from fastapi.staticfiles import StaticFiles
 
 from .data import DATA, FEATURE_PATH, MODEL_VERSION, schedule_rows, schedules, team_info
 from .markets import get_week_markets, get_week_totals, valuation
+from .mc_archive import get_forecasts
+from .mc_validation import metrics as mc_metrics
+from .mc_value import market_values
+from .forecast_feed import game_forecast, upcoming
 from .model import PREDICTIONS, get_metrics, get_predictions, train
 from .totals import PREDICTIONS as TOTAL_PREDICTIONS, VERSION as TOTAL_VERSION, get_metrics as get_total_metrics, get_predictions as get_total_predictions, over_probability, train as train_totals
 
@@ -22,6 +27,25 @@ STATIC = Path(__file__).resolve().parents[1] / "frontend"
 app.mount("/assets", StaticFiles(directory=STATIC), name="assets")
 logger = logging.getLogger(__name__)
 _refresh_task = None
+_mc_task = None
+
+
+def _prepare_mc():
+    rows = _all_games()
+    now = datetime.now(timezone.utc)
+    upcoming = [g for g in rows if g["game_type"] == "REG" and datetime.fromisoformat(g["kickoff"]) > now]
+    if upcoming:
+        season = upcoming[0]["season"]
+        get_forecasts(season, [g for g in upcoming if g["season"] == season])
+
+
+async def _refresh_mc_loop():
+    while True:
+        try:
+            await asyncio.to_thread(_prepare_mc)
+        except Exception:
+            logger.exception("Monte Carlo refresh failed")
+        await asyncio.sleep(30*60)
 
 
 async def _refresh_model_loop():
@@ -38,14 +62,17 @@ async def _refresh_model_loop():
 
 @app.on_event("startup")
 async def _start_refresh():
-    global _refresh_task
+    global _refresh_task, _mc_task
     _refresh_task = asyncio.create_task(_refresh_model_loop())
+    _mc_task = asyncio.create_task(_refresh_mc_loop())
 
 
 @app.on_event("shutdown")
 async def _stop_refresh():
     if _refresh_task:
         _refresh_task.cancel()
+    if _mc_task:
+        _mc_task.cancel()
 
 
 def _all_games() -> list[dict]:
@@ -105,6 +132,24 @@ def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/healthz")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/upcoming")
+def upcoming_games(hours: int = Query(48, ge=1, le=168)):
+    return upcoming(hours)
+
+
+@app.get("/api/games/{game_id}/forecast")
+def forecast(game_id: str):
+    game = next((g for g in _all_games() if g["game_id"] == game_id), None)
+    if game is None:
+        raise HTTPException(404, "Game not found")
+    return game_forecast(game)
+
+
 @app.get("/api/meta")
 def meta():
     rows = _all_games()
@@ -142,6 +187,25 @@ async def markets(season: int | None = None, week: int | None = None, quantity: 
     return {"season": season, "week": week, **await get_week_markets(selected, quantity, refresh)}
 
 
+@app.get("/api/monte-carlo/predictions")
+def monte_carlo_predictions(season: int, week: int):
+    season, week, selected = _selection(season, week)
+    return {"season": season, "week": week, "predictions": get_forecasts(season, selected)}
+
+
+@app.get("/api/games/{game_id}/monte-carlo")
+def monte_carlo_game(game_id: str):
+    game = next((g for g in _all_games() if g["game_id"] == game_id), None)
+    if not game:
+        raise HTTPException(404, "Game not found")
+    return get_forecasts(game["season"], [game])[game_id]
+
+
+@app.get("/api/model/monte-carlo-metrics")
+def monte_carlo_metrics(season: int):
+    return mc_metrics(season)
+
+
 @app.get("/api/totals")
 async def totals(season: int | None = None, week: int | None = None, quantity: float = Query(100, gt=0, le=10000), refresh: bool = False):
     season, week, selected = _selection(season, week)
@@ -166,8 +230,12 @@ def _total_value(total_prediction: dict | None, totals: dict | None, quantity: f
 @app.get("/api/value")
 async def value(season: int | None = None, week: int | None = None, quantity: float = Query(100, gt=0, le=10000), refresh: bool = False):
     season, week, selected = _selection(season, week)
-    preds, error = _predict_data()
-    total_preds, total_error = _total_predict_data()
+    return await _values(season, week, selected, quantity, refresh, True)
+
+
+async def _values(season, week, selected, quantity, refresh, include_existing):
+    preds, error = _predict_data() if include_existing else ({}, None)
+    total_preds, total_error = _total_predict_data() if include_existing else ({}, None)
     market_data = await get_week_markets(selected, quantity, refresh)
     total_data = await get_week_totals(selected, quantity, refresh)
     result = {}
@@ -186,10 +254,19 @@ async def value(season: int | None = None, week: int | None = None, quantity: fl
 
 
 @app.get("/api/dashboard")
-async def dashboard(season: int | None = None, week: int | None = None, quantity: float = Query(100, gt=0, le=10000), refresh: bool = False):
+async def dashboard(season: int | None = None, week: int | None = None, quantity: float = Query(100, gt=0, le=10000),
+                    refresh: bool = False, model: Literal["existing", "monte_carlo", "compare"] = "existing"):
     season, week, selected = _selection(season, week)
-    values = await value(season, week, quantity, refresh)
-    return {"season": season, "week": week, "games": [{**_base(g), **values["values"][g["game_id"]]} for g in selected],
+    forecasts = await asyncio.to_thread(get_forecasts, season, selected) if model != "existing" else {}
+    values = await _values(season, week, selected, quantity, refresh, model != "monte_carlo")
+    games = [{**_base(g), **values["values"][g["game_id"]]} for g in selected]
+    for g in games:
+        if g["game_id"] in forecasts:
+            f = forecasts[g["game_id"]]
+            upcoming = g["status"] == "Upcoming"
+            g.update(monte_carlo=f, mc_values=market_values(f, g["market"] if upcoming else None,
+                                                           g["totals"] if upcoming else None, quantity))
+    return {"season": season, "week": week, "games": games,
             "market_fetched_at": values["market_fetched_at"], "market_error": values["market_error"],
             "total_market_error": values["total_market_error"], "model_error": values["model_error"],
             "total_model_error": values["total_model_error"]}

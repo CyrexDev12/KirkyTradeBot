@@ -7,6 +7,8 @@ from pathlib import Path
 import json
 import math
 import os
+from tempfile import NamedTemporaryFile
+from threading import Lock
 
 import nflreadpy as nfl
 import numpy as np
@@ -59,16 +61,27 @@ def _fresh(path: Path, max_age_hours: int) -> bool:
     return path.exists() and (datetime.now(timezone.utc).timestamp() - path.stat().st_mtime < max_age_hours * 3600)
 
 
+_schedule_lock = Lock()
+
+
 def schedules(refresh: bool = False) -> pl.DataFrame:
     path = DATA / "schedules.parquet"
-    if refresh or not _fresh(path, 6):
-        try:
-            df = nfl.load_schedules(seasons=True)
-            df.write_parquet(path)
-        except Exception:
-            if not path.exists():
-                raise
-    return pl.read_parquet(path)
+    with _schedule_lock:
+        if refresh or not _fresh(path, float(os.getenv("NFL_SCHEDULE_CACHE_MINUTES", "360")) / 60):
+            tmp = None
+            try:
+                df = nfl.load_schedules(seasons=True)
+                with NamedTemporaryFile(dir=DATA, delete=False) as f:
+                    tmp = Path(f.name)
+                    df.write_parquet(f)
+                tmp.replace(path)
+            except Exception:
+                if not path.exists():
+                    raise
+            finally:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
+        return pl.read_parquet(path)
 
 
 def season_pbp(season: int, refresh: bool = False) -> pl.DataFrame:
@@ -132,7 +145,11 @@ def schedule_rows(df: pl.DataFrame) -> list[dict]:
             continue
         rows.append({"game_id": r["game_id"], "season": r["season"], "week": r["week"], "game_type": r["game_type"],
                      "kickoff": kick.isoformat(), "home": home, "away": away, "home_score": r["home_score"],
-                     "away_score": r["away_score"], "home_rest": r.get("home_rest"), "away_rest": r.get("away_rest")})
+                     "away_score": r["away_score"], "home_rest": r.get("home_rest"), "away_rest": r.get("away_rest"),
+                     "kickoff_confirmed": bool(r.get("gametime")),
+                     "neutral_site": {"Home": False, "Neutral": True}.get(r.get("location")),
+                     "result": r.get("result"), "source_status": r.get("status"),
+                     "result_available_at": r.get("result_available_at")})
     return sorted(rows, key=lambda r: (r["kickoff"], r["game_id"]))
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import os
+import re
 import time
 
 import httpx
@@ -268,7 +269,16 @@ def _reference_quote(match: dict, now: datetime) -> dict:
     return {"event_id": event.get("id"), "market_id": market.get("id"), "slug": market.get("slug"),
             "status": "REFERENCE_ONLY", "volume_contracts": None,
             "updated_at": market.get("updatedAt") or now.isoformat(), "fetched_at": now.isoformat(),
-            "outcomes": outcomes, "settlement": "Full game including overtime; tie settles at $0.50 per side; rescheduling rules apply."}
+            "outcomes": outcomes, "tie_payout": _tie_payout(market),
+            "settlement": "Full game including overtime; tie settles at $0.50 per side; rescheduling rules apply."}
+
+
+def _tie_payout(market):
+    # Only interpret the fixed-payout tie clauses that this adapter understands.
+    clauses = ("if the game ends in a tie, the market will settle to $0.50.",
+               "if there is a tie, each side settles at $0.50.")
+    desc = (market.get("description") or "").lower()
+    return .5 if any(clause in desc for clause in clauses) else None
 
 
 def _quote(match: dict, book: dict, quantity: float, now: datetime) -> dict:
@@ -298,13 +308,17 @@ def _quote(match: dict, book: dict, quantity: float, now: datetime) -> dict:
     return {"event_id": event.get("id"), "market_id": market.get("id"), "slug": market.get("slug"),
             "status": book.get("state"), "volume_contracts": stats.get("sharesTraded"),
             "updated_at": book.get("transactTime") or (stats.get("lastPriceSample") or {}).get("ts") or now.isoformat(),
-            "fetched_at": now.isoformat(), "outcomes": outcomes,
+            "fetched_at": now.isoformat(), "outcomes": outcomes, "tie_payout": _tie_payout(market),
             "settlement": "Full game including overtime; tie settles at $0.50 per side; rescheduling rules apply."}
 
 
 def _total_quote(match: dict, now: datetime, book: dict | None = None, quantity: float = 100) -> dict:
     quote = _quote(match, book, quantity, now) if book is not None else _reference_quote(match, now)
     quote["line"] = match["line"]
+    desc = (match["market"].get("description") or "").lower()
+    rule = re.search(r"\bcombine for over (\d+\.\d+) points\b", desc)
+    quote["full_game_half_point_payout"] = bool(rule and float(rule[1]) == match["line"])
+    quote.pop("tie_payout", None)
     quote["settlement"] = "Combined points, full game including overtime. Half-point line; no score push. Rescheduling rules apply."
     return quote
 

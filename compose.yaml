@@ -1,0 +1,62 @@
+name: nfl-fair-value
+services:
+  backend:
+    build:
+      context: .
+      target: backend
+    init: true
+    restart: unless-stopped
+    environment:
+      NFL_DATA_DIR: /data
+      NFL_SCHEDULE_CACHE_MINUTES: "15"
+    volumes:
+      - predictions:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  bot:
+    build:
+      context: .
+      target: bot
+    init: true
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NFL_API_URL: http://backend:8000
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-1572302708419985518}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-1572300706478817441}
+      DISCORD_TOKEN_FILE: /run/secrets/discord_token
+      DISCORD_STATE_PATH: /state/discord.sqlite3
+    secrets:
+      - discord_token
+    volumes:
+      - bot-state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import time,pathlib; assert time.time()-float(pathlib.Path('/state/discord.heartbeat').read_text())<180"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  predictions:
+  bot-state:
+secrets:
+  discord_token:
+    file: ${DISCORD_TOKEN_FILE_HOST:-./.secrets/discord_token.txt}

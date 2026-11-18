@@ -4,6 +4,8 @@ Local, read-only NFL pregame analytics dashboard. It estimates each team's full-
 
 ## Run
 
+The Discord companion provides pregame alerts, weekly matchup buttons, and both model predictions. Azure deployment files use your existing Discord application and Canada Central. See the [Discord and Azure setup guide](deploy/README.md) for Cloud Shell deployment and command configuration.
+
 Requires Python 3.11 or newer. From this directory:
 
 ```bash
@@ -40,6 +42,81 @@ Net edge is model fair value minus book execution cost minus estimated taker fee
 
 The market client caches event metadata for five minutes, books for 45 seconds, paces requests, and backs off after HTTP 429. If the book is rate limited, it shows the event's verified reference bid/ask with a **Reference quote · depth unavailable** label; the raw model-versus-market difference remains visible, while executable net edge is withheld. A book retained after a failed refresh is marked stale and also cannot produce a net-edge signal.
 
+## Current-season Monte Carlo
+
+Select **Current-season Monte Carlo** or **Compare models** in the board's model selector. The simulator uses completed regular-season scoreboard results from the selected NFL season. Each of 50,000 seeded draws produces paired home and away final scores including overtime. Cards show expected points, unconditional win probabilities, final ties, and an 80% predictive interval for combined points. Details include total and margin histograms, verified exchange total lines, team evidence, and experimental settlement-aware net values. Compare mode shows home win probabilities conditional on no final tie for comparison with the existing binary model.
+
+The scoring fit uses these equations.
+
+```text
+home mean = b + home scoring strength - away score prevention + h/2
+away mean = b + away scoring strength - home score prevention - h/2
+```
+
+The intercept is unpenalized. Team coefficients have ridge penalty 4 and the home-margin coefficient has penalty 16. A game contributes two score rows with the same unnormalized weight, `2 ** (-age_days / 28)`. The free intercept and equal positive penalties force each family of team effects to average zero. Neutral games use zero venue adjustment. Every fitted coefficient, baseline, and residual comes from the selected season. Predictions are independent of prices, quantities, and the earlier-season models.
+
+Public availability requires four games for each team, 40 forward error pairs, and residual effective sample size 25. Four or five team games receive a **Limited sample** label. Internal fits can generate error pairs once each team has two games. A previous-week fit predicts both sides of each earlier game, then its errors enter the paired bank. Weighted errors are centered by role and sampled together. Neutral-site banks additionally include equally weighted swapped pairs. The rounding rule is `max(0, floor(mean + error + 0.5))`. All scores, margins, totals, and probabilities use those same draws.
+
+### Cutoffs, storage and reproducibility
+
+The schedule source provides scores and kickoff times without historical completion or ingestion timestamps. This implementation conservatively admits a result on the next Tuesday at noon Eastern and requires its week to precede the target week. Thus live forecasts also exclude same-week results. Explicit availability timestamps, when supplied, must precede the cutoff. Invalid, incomplete, conflicting, unsupported, and unknown-venue records are excluded. NFL season comes from the schedule's season field, including January games. The schedule schema and Eastern kickoff convention are documented by NFLverse. [Schedule dictionary](https://nflreadr.nflverse.com/articles/dictionary_schedules.html)
+
+The separate `data/monte_carlo.sqlite3` database records the first MC observation of each admitted result revision, complete eligible input snapshots, reconstructed error banks, configuration, seeded distributions, and every pregame artifact. SQLite transactions serialize concurrent builds and atomically commit results. Forecasts retain their fixed cutoff until eligible inputs, target scheduling information, or model configuration changes. Quote polls and quantity changes reuse stored forecasts. Paired score counts and discrete marginal histograms retain the sampled distribution.
+
+The latest actual pregame artifact freezes when kickoff passes or the game is observed to have started. The frozen marker survives a later kickoff change. Missing pregame records show **No archived pregame MC prediction**. Historical evaluation runs separately as a reconstruction. Current-source corrections can alter a new reconstruction, while stored pregame snapshots retain their original inputs.
+
+MC preparation runs separately from historical model training at startup and every 30 minutes. Loading the MC board can also prepare missing upcoming artifacts. It shares the six-hour NFLverse schedule cache. MC works using schedules alone.
+
+Configuration comes from these environment variables.
+
+| Variable | Default |
+| --- | --- |
+| `NFL_MC_SIMULATIONS` | 50000 |
+| `NFL_MC_HALF_LIFE_DAYS` | 28 |
+| `NFL_MC_TEAM_RIDGE` | 4 |
+| `NFL_MC_HOME_RIDGE` | 16 |
+| `NFL_MC_MIN_TEAM_GAMES` | 4 |
+| `NFL_MC_RESIDUAL_WARMUP_TEAM_GAMES` | 2 |
+| `NFL_MC_MIN_RESIDUAL_PAIRS` | 40 |
+| `NFL_MC_MIN_RESIDUAL_EFFECTIVE_N` | 25 |
+| `NFL_MC_BASE_SEED` | 17 |
+
+These are provisional engineering settings. MC signal badges are disabled in this release. Net values use the existing depth and fee calculation after mapping verified contract payouts, including explicitly recognized $0.50 final-tie settlement. Unrecognized settlement terms return no fair value or executable edge. Displayed values assume normal full-game settlement, and the exchange's rescheduling terms still apply. Changing the total line queries the cached histogram.
+
+### Prepare, inspect and evaluate
+
+On Windows, create the environment with `python -m venv .venv` and install dependencies with `.venv\Scripts\python -m pip install -r requirements.txt pytest`. Use `.venv/bin/python` on macOS/Linux.
+
+```powershell
+.venv\Scripts\python -m backend.mc_validation --season 2026
+.venv\Scripts\python -m backend.mc_validation --season 2026 --game 2026_11_IND_HOU
+.venv\Scripts\python -m backend.mc_validation --season 2026 --evaluate --as-of 2026-11-17T17:00:00+00:00
+.venv\Scripts\python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+```
+
+The game command prints the complete archived forecast, every input result, game weights, and all reconstructed residual pairs. The evaluation command prints binary and three-way scores, calibration bins with counts, score errors, signed bias, interval coverage and width, tails, ties, and clipping diagnostics. Totals probability calibration uses the predefined lines 37.5, 44.5, and 51.5. Numerical log-loss clipping is fixed at `1e-6`. Run the existing `backend.prepare` command first to include its held-out forecasts in comparisons.
+
+Legacy comparisons accept season-held-out artifacts on matching games when the legacy feature history contains the same eligible season prefix. Additional earlier games in the target week are accepted only when neither target team participates, since those rows cannot update either team's stored features. Live production predictions are excluded from this historical comparison. The weighted-PPG baseline uses the same games and cutoff as MC.
+
+### Initial 2026 reconstruction
+
+With model `paired-scores-v1.0`, default settings, and cutoff November 17, 2026 at 10 AM Arizona time, 71 of 150 admitted completed games were eligible for public MC forecasts, giving 47.3% coverage. All 71 also had comparable existing-model reconstructions.
+
+| Matched-game metric | Monte Carlo | Existing model | Weighted PPG |
+| --- | --- | --- | --- |
+| Binary Brier score, excluding actual ties | 0.2155 | 0.2339 | — |
+| Binary log loss | 0.6195 | 0.6592 | — |
+| Binary accuracy | 66.2% | 62.0% | — |
+| Total MAE, points | 10.66 | 10.67 | 10.78 |
+| Total RMSE, points | 13.88 | 13.67 | 13.96 |
+| Total signed bias, projected minus actual | +0.57 | −0.24 | +0.55 |
+
+The MC 80% total interval covered 78.9% of outcomes, with average width 33.63 points. Mean predicted tie probability was 3.91% and observed final ties were zero. This is an initial reconstructed sample. Forward archives are required to assess continued performance and tie calibration.
+
+For the archived Colts-at-Texans artifact created November 17 at 10:07 AM Arizona time, nine Houston games, ten Indianapolis games, and 118 paired errors produced expected scores of Houston 26.9 and Indianapolis 22.3. The total mean was 49.2 with an 80% interval of 34–66. Home win, away win, and final tie probabilities were 64.22%, 32.87%, and 2.91%. The CLI exposes its complete source snapshot. Future eligible results or revised settings produce a new upcoming artifact.
+
+The pooled residual bank has finite support and cannot capture every matchup's volatility, lineup changes, or injuries. More draws reduce sampling noise. At a 50% estimate and 50,000 draws, numerical standard error is about 0.224 percentage points. Team-rating and distribution-model uncertainty require separate forward validation. Final-tie frequency is especially sensitive to integer rounding. Predictions remain labeled **Experimental score approximation**.
+
 ## API
 
 | Endpoint | Description |
@@ -55,6 +132,11 @@ The market client caches event metadata for five minutes, books for 45 seconds, 
 | `/api/games/{game_id}/analysis` | Pregame metric comparison and provenance |
 | `/api/model/metrics` | Walk-forward validation and calibration |
 | `/api/model/totals-metrics` | Score regression walk-forward MAE, RMSE, bias, interval coverage |
+| `/api/monte-carlo/predictions?season=2026&week=11` | Current-season forecasts and structured availability states |
+| `/api/games/{game_id}/monte-carlo` | One archived MC forecast with distributions and provenance |
+| `/api/model/monte-carlo-metrics?season=2026` | Chronological reconstruction, coverage and matched-game metrics |
+
+The dashboard accepts `model=existing`, `model=monte_carlo`, or `model=compare`. Its default is `existing`.
 
 API docs are available at `/docs`. A `refresh=true` query parameter bypasses the short market cache. Market quotes are requested only for games that have not kicked off.
 
@@ -65,6 +147,8 @@ API docs are available at `/docs`. A `refresh=true` query parameter bypasses the
 ```
 
 The integrity tests cover current-game leakage, strict winner and total market matching, short-side order book execution, and net-edge math.
+
+MC tests additionally cover season and cutoff isolation, incomplete results, weighted ridge effects, forward residual provenance, neutral symmetry, paired score coherence, deterministic concurrent caches, kickoff freezing, schedule changes, rounding, numerical convergence, settlement mapping, matched evaluation, and API mode compatibility.
 
 ## Known limits
 
