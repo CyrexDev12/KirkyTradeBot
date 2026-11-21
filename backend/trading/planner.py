@@ -7,7 +7,8 @@ Accepted trades are activated only after revalidation against a fresh book.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 
 from .book import is_fresh, selected_view
 from .candidates import CandidateInput, evaluate, finalize
@@ -20,24 +21,52 @@ from .risk import Exposure, exposure as current_exposure, suspension
 from .store import Store
 from .valuation import (GB, MC, gb_moneyline, gb_total, mc_moneyline, mc_total, unavailable)
 
+logger = logging.getLogger(__name__)
+
 
 def plan_key(cfg: StrategyConfig, season: int, week: int) -> str:
     return f"{cfg.strategy_id}:{season}:{week:02d}"
 
 
 class WeeklyPlanner:
-    def __init__(self, store: Store, cfg: StrategyConfig, inputs, fees=None):
+    def __init__(self, store: Store, cfg: StrategyConfig, inputs, fees=None, progress=None):
         self.store, self.cfg, self.inputs, self.fees = store, cfg, inputs, fees
+        self.progress = progress
+        self._status = {}
+
+    def _report(self, stage, **values):
+        self._status.update(values, stage=stage, updated_at=iso(datetime.now(timezone.utc)))
+        if self.progress:
+            self.progress(dict(self._status))
 
     def _theta(self, engine, now, market_type):
         return engine.theta(now, market_type)
 
     async def candidates(self, season: int, week: int, now: datetime) -> list[CandidateInput]:
         games = [g for g in self.inputs.games(season, week) if datetime.fromisoformat(g["kickoff"]) > now]
+        self._status = {"season": season, "week": week, "games_total": len(games), "games_completed": 0,
+                        "books_requested": 0, "books_received": 0}
+        self._report("discovering_markets")
+        logger.info("Planning %s week %s: discovering markets for %s games", season, week, len(games))
         markets = await self.inputs.markets(games)
         tie = self.inputs.tie_estimate()
         out = []
+        # Both outcomes use the same canonical book. Scope reuse to this planning
+        # pass only; activation must still request a fresh book independently.
+        books = {}
+
+        async def book(spec):
+            if spec is None:
+                return None
+            slug = spec.market_slug
+            if slug not in books:
+                self._report("fetching_books", market_slug=slug, books_requested=len(books) + 1)
+                books[slug] = await self.inputs.book(slug)
+                self._report("fetching_books", books_received=sum(s is not None for s in books.values()))
+            return books[slug]
+
         for game in games:
+            self._report("preparing_game", game_id=game["game_id"], market_slug=None)
             gm = markets.get(game["game_id"]) or {}
             gb_pred, mc_fc = self.inputs.gb_prediction(game), self.inputs.mc_forecast(game)
             ml = gm.get("moneyline")
@@ -52,7 +81,7 @@ class WeeklyPlanner:
                                   self.inputs.uncertainty(GB, "moneyline")) if spec else unavailable(GB, "no contract")
                 mc = mc_moneyline(mc_fc, team, game["home"], tie_payout,
                                   self.inputs.uncertainty(MC, "moneyline")) if spec else unavailable(MC, "no contract")
-                snap = await self.inputs.book(spec.market_slug) if spec else None
+                snap = await book(spec)
                 if spec:
                     self.store.record_contract(spec, now)  # enables later replay labeling of recorded books
                 out.append(CandidateInput(game, "moneyline", team, spec, err, gb, mc, snap, now))
@@ -68,7 +97,7 @@ class WeeklyPlanner:
                     gb = gb_total(self.inputs.gb_total_over(game, line), outcome, gbt,
                                   self.inputs.uncertainty(GB, "total"))
                     mc = mc_total(self.inputs.mc_total(mc_fc, line), outcome, mc_fc, self.inputs.uncertainty(MC, "total"))
-                    snap = await self.inputs.book(spec.market_slug) if spec else None
+                    snap = await book(spec)
                     if spec:
                         self.store.record_contract(spec, now)
                     out.append(CandidateInput(game, "total", outcome, spec, err, gb, mc, snap, now))
@@ -76,6 +105,9 @@ class WeeklyPlanner:
                 err = MappingError("NO_LISTED_MARKET", "No verified moneyline or full-game total contract")
                 out.append(CandidateInput(game, "moneyline", "-", None, err, unavailable(GB, "no market"),
                                           unavailable(MC, "no market"), None, now))
+            self._report("collecting", games_completed=self._status["games_completed"] + 1)
+            logger.info("Planning %s week %s: %s/%s games collected; %s unique books requested", season, week,
+                        self._status["games_completed"], len(games), len(books))
         return out
 
     async def run(self, season: int, week: int, now: datetime) -> dict:
@@ -97,6 +129,7 @@ class WeeklyPlanner:
                      if v.get("passed")}
         estimator = AnalogueEstimator(store.path_examples(), cfg)
         inputs = await self.candidates(season, week, now)
+        self._report("evaluating", candidates=len(inputs), market_slug=None)
         decisions = []
         for inp in inputs:
             theta = engine.theta(now, inp.market_type) if inp.spec else ZERO
@@ -156,6 +189,8 @@ class WeeklyPlanner:
                            "VALUES (?,?,?,?,?,?)", (key, d.plan.trade_id, 1, "initial plan", dumps(d.plan.to_dict()),
                                                     iso(now)))
         store.commit(engine, now, outbox, extra=write)
+        self._report("published", qualifying_trades=len(accepted))
+        logger.info("Published paper plan %s: %s candidates, %s qualifying trades", key, len(inputs), len(accepted))
         return store.weekly_plan(key)
 
     def _summary(self, decisions, accepted, account, validation, estimator) -> dict:

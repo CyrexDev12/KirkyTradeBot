@@ -34,6 +34,9 @@ class PredictionAPI:
     async def paper(self, path):
         return await self.get("/api/paper" + path)
 
+    async def crypto(self, path, **params):
+        return await self.get("/api/crypto" + path, **params)
+
     def _operator_headers(self):
         if not self.token:
             raise PermissionError("NFL_PAPER_OPERATOR_TOKEN is not configured for the bot")
@@ -44,8 +47,11 @@ class PredictionAPI:
         response.raise_for_status()
         return response.json()
 
-    async def paper_outbox(self):
-        response = await self.client.get("/api/paper/outbox/pending", headers=self._operator_headers())
+    async def paper_outbox(self, channels=None):
+        params = [("channels", channel) for channel in (channels or [])]
+        if channels and "parlay" in channels:
+            params.append(("include_current_parlay", "true"))
+        response = await self.client.get("/api/paper/outbox/pending", params=params, headers=self._operator_headers())
         response.raise_for_status()
         return response.json()
 

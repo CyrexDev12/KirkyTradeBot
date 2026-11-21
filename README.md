@@ -4,7 +4,19 @@ Local, read-only NFL pregame analytics dashboard. It estimates each team's full-
 
 ## Run
 
-The Discord companion provides pregame alerts, weekly matchup buttons, and both model predictions. Azure deployment files use your existing Discord application and Canada Central. See the [Discord and Azure setup guide](deploy/README.md) for Cloud Shell deployment and command configuration.
+The Discord companion provides pregame alerts, matchup buttons, weekly NFL parlays, and separate NFL and BTC paper accounts. Use `/parlay` for the informational weekly card, `/account` for NFL and `/crypto-account` for BTC. A server manager sets publication channels with `/paper-channels set`. The live Azure VM is in Mexico Central. See the [existing VM update guide](deploy/UPDATE_AZURE.md) or the [new installation guide](deploy/README.md).
+
+Run `/paper-channels setup` as a server manager and choose a BTC channel and a weekly parlay channel. Use `/paper-channels show` to check the destinations. The bot saves these choices across restarts.
+
+The weekly NFL board mixes two shorter two-leg tickets with a three-, four- and five-leg ticket when the slate qualifies. Each ticket uses different games within it. A moneyline or over/under leg needs at least 55% support from both the gradient and Monte Carlo models. The board shows both forecasts alongside each leg’s American and decimal odds. It lists each ticket’s model hit chance, rating and risk score. The hit estimate multiplies the weaker forecast on each leg, assumes independence between games and treats moneyline results as conditional on a decisive game. The rating follows the weakest leg. Risk rises as the chance of landing every pick falls.
+
+The payout multiplier is the product of the exact selections’ NFLverse reference decimal odds. For example, two picks at −200 each yield 1.50 × 1.50 = 2.25×, or +125 combined. A winning $10 example returns $22.50 including the stake. The break-even percentage is one divided by the multiplier. The schedule has no sportsbook promotional-boost terms or guaranteed parlay quote. Missing prices are shown individually and the combined payout is available when every leg is priced. Parlays are informational and do not create positions. [NFLverse schedule fields](https://nflreadr.nflverse.com/articles/dictionary_schedules.html)
+
+The BTC worker evaluates six slots every day at 6:00, 6:30, 7:00, 7:30, 8:00 and 8:30 AM in `America/Phoenix`. It uses eight hours of completed five-minute Coinbase BTC-USD candles to form 15-minute trend and volatility estimates. Each slot can produce a paper long, a paper short, or a skip with a reason. The BTC channel receives entries, exits and skips after setup. Use `/crypto-trades` for recent history. [Coinbase candle format](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles)
+
+The BTC account starts at $100. Position sizing reduces the amount as trend quality declines. At full strength, the position is capped at 20% of balance and the planned loss at the stop at 0.5%. The target aims for 1.5 times that risk after estimated costs. A 1.5% daily realized loss pauses further entries that Arizona day. The simulation crosses the observed spread and assumes a 0.4% fee and 0.02% slippage per side. It skips signals whose target is more than three recent average ranges away. Open positions close on an observed stop or target, or on the first usable quote at or after the 15-minute window ends. Prices can move through a stop between observations. These are paper strategy assumptions with no established profitability record.
+
+`/crypto-stats` shows lifetime wins, losses, break-evens, and profit after costs. Win rate divides profitable trades by all closed trades. Skips and open positions are counted separately. To adjust its next position, the worker looks at up to 40 recent trades in the same direction and Arizona hour over 90 days. With at least 20 usable outcomes, under 40% wins, and losses on average per dollar at risk in both halves of the sample, it halves the usual size. It can return to its usual size as evidence changes. Delayed exits more than a minute past the window count toward lifetime results only.
 
 Requires Python 3.11 or newer. From this directory:
 
@@ -119,7 +131,7 @@ The pooled residual bank has finite support and cannot capture every matchup's v
 
 ## Paper trading (PAPER_ONLY)
 
-A separate `paper-worker` service runs a persistent $100 **paper** account. It records public Polymarket US books, plans weekly contract-price trades only when both the GB model and the MC model support the same contract after costs, simulates fills conservatively against observed depth, and posts plans, trade cards and weekly reports to Discord (`/picks`, `/trade`, `/account`, `/performance`, `/why-no-trades`, `/health`). It never submits real orders. Until enough market-path history is recorded and validated, it correctly publishes zero rated trades. See [docs/PAPER_TRADING.md](docs/PAPER_TRADING.md) for setup, rules and the capability report. The `/api/paper/*` endpoints are listed at `/docs`.
+A separate `paper-worker` service runs a persistent $100 **paper** account. It records public Polymarket US books, plans weekly contract-price trades only when both the GB model and the MC model support the same contract after costs, simulates fills conservatively against observed depth, and posts plans, trade cards and weekly reports to Discord (`/picks`, `/trade`, `/account`, `/performance`, `/why-no-trades`, `/health`). It never submits real orders. The current strategy can use labeled modeled-path estimates before recorded market-path history is sufficient; missing model inputs or failed screening gates produce no qualifying trades. See [docs/PAPER_TRADING.md](docs/PAPER_TRADING.md) for setup, rules and the capability report. The `/api/paper/*` endpoints are listed at `/docs`.
 
 ## API
 

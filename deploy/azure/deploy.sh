@@ -9,8 +9,8 @@ if [[ "$mode" != "deploy" && "$mode" != "--plan" ]]; then
 fi
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 resource_group="${NFL_RESOURCE_GROUP:-nfl-fair-value-rg}"
-location="${NFL_AZURE_LOCATION:-canadacentral}"
-vm_size="${NFL_VM_SIZE:-Standard_B2as_v2}"
+location="${NFL_AZURE_LOCATION:-mexicocentral}"
+vm_size="${NFL_VM_SIZE:-Standard_B2s_v2}"
 private_key="${NFL_SSH_KEY:-$HOME/.ssh/nfl-discord}"
 admin_ip="$(curl -fsS https://api.ipify.org)"
 if [[ ! "$admin_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

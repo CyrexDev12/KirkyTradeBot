@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import json
 import logging
 import os
 import signal
@@ -23,6 +24,7 @@ from .config import StrategyConfig
 from .inputs import TRADING_DIR, LiveInputs
 from .jobs import WeeklyJobs
 from .paper_engine import ACTIVE_ENTRY
+from .parlay import ParlayPublisher
 from .planner import WeeklyPlanner
 from .reports import lifecycle_alerts, trade_card_publication
 from .store import Store
@@ -31,6 +33,7 @@ from .venue import MarketRecorder, ReadOnlyVenueClient
 logger = logging.getLogger(__name__)
 DB_PATH = os.getenv("NFL_PAPER_DB", str(TRADING_DIR / "paper_trading.sqlite3"))
 HEALTH_PATH = TRADING_DIR / "worker.health.json"
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 def trade_status(engine, tid: str) -> str:
@@ -48,13 +51,36 @@ class Worker:
     def __init__(self, store: Store, cfg: StrategyConfig, venue: ReadOnlyVenueClient, inputs: LiveInputs):
         self.store, self.cfg, self.venue, self.inputs = store, cfg, venue, inputs
         self.recorder = MarketRecorder(venue, store, cfg.active_poll_seconds, cfg.idle_poll_seconds)
-        self.planner = WeeklyPlanner(store, cfg, inputs)
-        self.jobs = WeeklyJobs(store, cfg, self.planner, inputs)
+        self.planner = WeeklyPlanner(store, cfg, inputs, progress=self._planning_progress)
+        self.jobs = WeeklyJobs(store, cfg, self.planner, inputs, parlay=ParlayPublisher(store))
         self.engine = store.load_engine(cfg)
         self.last_jobs = 0.0
         self.last_schedule = 0.0
         self.status = {"started_at": iso(datetime.now(timezone.utc)), "last_loop": None, "last_jobs": None,
-                       "last_error": None}
+                       "last_error": None, "last_heartbeat": None, "phase": "starting", "planning": None}
+
+    def _write_health(self):
+        self.status["feed_errors"] = dict(self.recorder.errors)
+        self.status["venue_error"] = self.venue.last_error
+        HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = HEALTH_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.status))
+        temporary.replace(HEALTH_PATH)
+
+    def _planning_progress(self, progress):
+        self.status["planning"] = progress
+        self._write_health()
+
+    async def _heartbeat(self, stop):
+        # Network waits during a full-slate scan can exceed the health-check
+        # timeout. Report process liveness separately from completed work.
+        while not stop.is_set():
+            self.status["last_heartbeat"] = iso(datetime.now(timezone.utc))
+            self._write_health()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
 
     def _idle_slugs(self) -> set:
         plan = self.store.latest_plan(self.cfg.strategy_id)
@@ -80,6 +106,7 @@ class Worker:
             raise
 
     async def loop_once(self):
+        self.status["phase"] = "polling_books"
         now = datetime.now(timezone.utc)
         self.engine = self.store.load_engine(self.cfg)  # pick up activations made by the planner
         active = {p.market_slug for tid, p in self.engine.state.plans.items()
@@ -94,14 +121,13 @@ class Worker:
         self._commit(now)
         if time.monotonic() - self.last_jobs >= 60:
             self.last_jobs = time.monotonic()
+            self.status["phase"] = "weekly_jobs"
+            self._write_health()
             await self.jobs.tick(now)
-            self.status["last_jobs"] = iso(now)
-        self.status["last_loop"] = iso(now)
-        self.status["feed_errors"] = dict(self.recorder.errors)
-        self.status["venue_error"] = self.venue.last_error
-        HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        HEALTH_PATH.write_text(json.dumps(self.status))
+            self.status["last_jobs"] = iso(datetime.now(timezone.utc))
+        self.status["last_loop"] = iso(datetime.now(timezone.utc))
+        self.status["phase"] = "idle"
+        self._write_health()
 
     def _schedule_events(self, now):
         try:
@@ -127,18 +153,29 @@ class Worker:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
-        while not stop.is_set():
+        heartbeat = asyncio.create_task(self._heartbeat(stop))
+        try:
+            while not stop.is_set():
+                if heartbeat.done():
+                    await heartbeat  # Surface a failed heartbeat writer.
+                try:
+                    self.status["last_error"] = None
+                    await self.loop_once()
+                except Exception as exc:
+                    self.status["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                    self.status["phase"] = "error"
+                    logger.exception("Paper worker loop failed; state reloaded from the journal")
+                    self._write_health()
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=self.cfg.active_poll_seconds)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            stop.set()
             try:
-                await self.loop_once()
-                self.status["last_error"] = None
-            except Exception as exc:
-                self.status["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
-                logger.exception("Paper worker loop failed; state reloaded from the journal")
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=self.cfg.active_poll_seconds)
-            except asyncio.TimeoutError:
-                pass
-        await self.venue.close()
+                await heartbeat
+            finally:
+                await self.venue.close()
 
 
 def main():

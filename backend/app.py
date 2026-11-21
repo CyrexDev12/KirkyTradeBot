@@ -21,12 +21,14 @@ from .mc_value import market_values
 from .forecast_feed import game_forecast, upcoming
 from .model import PREDICTIONS, get_metrics, get_predictions, train
 from .trading.api import router as paper_router
+from .crypto.api import router as crypto_router
 from .totals import PREDICTIONS as TOTAL_PREDICTIONS, VERSION as TOTAL_VERSION, get_metrics as get_total_metrics, get_predictions as get_total_predictions, over_probability, train as train_totals
 
 app = FastAPI(title="NFL Fair Value", version="1.0.0")
 STATIC = Path(__file__).resolve().parents[1] / "frontend"
 app.mount("/assets", StaticFiles(directory=STATIC), name="assets")
 app.include_router(paper_router)
+app.include_router(crypto_router)
 logger = logging.getLogger(__name__)
 _refresh_task = None
 _mc_task = None

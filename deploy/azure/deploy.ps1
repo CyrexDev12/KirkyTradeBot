@@ -4,8 +4,8 @@ param(
     [Parameter(Mandatory)][string]$AdminCidr,
     [Parameter(Mandatory)][string]$SshPrivateKeyPath,
     [string]$ResourceGroup = 'nfl-fair-value-rg',
-    [string]$Location = 'canadacentral',
-    [string]$VmSize = 'Standard_B2as_v2',
+    [string]$Location = 'mexicocentral',
+    [string]$VmSize = 'Standard_B2s_v2',
     [string]$TokenFile,
     [switch]$PlanOnly
 )

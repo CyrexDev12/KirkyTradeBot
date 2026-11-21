@@ -1,8 +1,10 @@
 """Acceptance tests for the PAPER_ONLY trading subsystem (brief section 18)."""
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
+import json
 from pathlib import Path
 import re
 
@@ -23,7 +25,7 @@ from backend.trading.scoring import Rating
 from backend.trading.store import Store
 from backend.trading.valuation import MC, TieEstimate, UncertaintyProfile, gb_moneyline, mc_moneyline
 from backend.trading.venue import PaperOnlyViolation, check_request
-from bot.paper import PaperPosts, PaperPublisher
+from bot.paper import PaperPosts, PaperPublisher, receipt
 
 T0 = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 KICK = T0 + timedelta(hours=6)
@@ -433,11 +435,159 @@ def test_no_history_week_creates_zero_orders_and_explains(tmp_path):
     plan_row = asyncio.run(planner.run(2026, 12, T0))
     s = plan_row["summary"]
     assert s["qualifying_trades"] == 0
-    assert s["headline"] == "No rated trades this week — insufficient market-path history to estimate scalp outcomes."
+    assert "more price history" in s["headline"]
     assert "INSUFFICIENT_EXECUTION_HISTORY" in s["primary_reasons"]
     assert store.load_engine(CFG).state.orders == {}
     pubs = store.pending_publications()
-    assert pubs and "insufficient market-path history" in pubs[0]["payload"]["description"]
+    assert pubs and s["headline"] in pubs[0]["payload"]["description"]
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_plan_fetches_each_binary_book_once_per_pass(tmp_path, available):
+    class CountingInputs(FakeInputs):
+        calls = None
+
+        async def markets(self, games):
+            totals = [{"event": EVENT, "line": line,
+                       "market": {"slug": f"total-{line}",
+                                  "description": f"Teams combine for over {line} points. Overtime is included."},
+                       "sides": {"over": {"long": True}, "under": {"long": False}}}
+                      for line in (41.5, 44.5)]
+            return {GAME["game_id"]: {"moneyline": ml_match(), "totals": totals}}
+
+        async def book(self, slug):
+            self.calls.append(slug)
+            return replace(self.snap, slug=slug) if available else None
+
+    inputs = CountingInputs(book_now(T0))
+    inputs.calls = []
+    store, planner = planner_with(tmp_path, inputs=inputs)
+    progress = []
+    planner.progress = progress.append
+    candidates = asyncio.run(planner.candidates(2026, 12, T0))
+    assert len(candidates) == 6  # both sides of moneyline and both alternative totals
+    assert all(c.spec is not None for c in candidates)
+    assert len(inputs.calls) == len(set(inputs.calls)) == 3
+    for first, second in zip(candidates[::2], candidates[1::2]):
+        assert first.spec.market_slug == second.spec.market_slug
+        assert first.snapshot is second.snapshot
+    assert progress[-1]["games_completed"] == progress[-1]["games_total"] == 1
+    assert progress[-1]["books_requested"] == 3
+    assert progress[-1]["books_received"] == (3 if available else 0)
+    asyncio.run(planner.candidates(2026, 12, T0 + timedelta(seconds=1)))
+    assert len(inputs.calls) == 6  # no book reuse across planning passes
+
+
+def test_activation_does_not_reuse_planning_book(tmp_path):
+    class CountingInputs(FakeInputs):
+        calls = 0
+
+        async def book(self, slug):
+            self.calls += 1
+            return self.snap
+
+    inputs = CountingInputs(book_now(T0))
+    store, planner = planner_with(tmp_path, grid_examples(), inputs=inputs)
+    row = asyncio.run(planner.run(2026, 12, T0))
+    assert row["summary"]["qualifying_trades"] == 1
+    assert inputs.calls == 1
+    # The market has moved below the stop since planning: fresh revalidation must reject it.
+    inputs.snap = snap(60, [(0.01, 400)], [(0.02, 400)], slug="nfl-ind-hou")
+    results = asyncio.run(planner.activate(row["plan_key"], T0 + timedelta(minutes=1)))
+    assert inputs.calls == 2
+    assert results[0]["status"] == "INVALIDATED"
+    assert results[0]["reason"] == "best bid at or below stop trigger"
+
+
+def test_worker_heartbeat_and_progress_continue_during_slow_planning(tmp_path, monkeypatch):
+    from backend.trading import worker as worker_module
+    health = tmp_path / "worker.health.json"
+    monkeypatch.setattr(worker_module, "HEALTH_PATH", health)
+    monkeypatch.setattr(worker_module, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+
+    class Venue:
+        last_error = "HTTP 429"
+
+    async def scenario():
+        waiting, release, stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        class SlowInputs(FakeInputs):
+            async def book(self, slug):
+                waiting.set()
+                await release.wait()
+                return self.snap
+
+        worker = worker_module.Worker(Store(tmp_path / "worker.sqlite3"), CFG, Venue(), SlowInputs(book_now(T0)))
+        heartbeat = asyncio.create_task(worker._heartbeat(stop))
+        planning = asyncio.create_task(worker.planner.run(2026, 12, T0))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=2)
+            before = json.loads(health.read_text())
+            assert before["planning"]["stage"] == "fetching_books"
+            assert before["planning"]["books_requested"] == 1
+            assert before["planning"]["books_received"] == 0
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                during = json.loads(health.read_text())
+                if during["last_heartbeat"] != before["last_heartbeat"]:
+                    break
+            assert during["last_heartbeat"] != before["last_heartbeat"]
+            assert during["last_loop"] is None and during["last_jobs"] is None
+            assert during["venue_error"] == "HTTP 429"
+            assert not planning.done()
+            release.set()
+            await asyncio.wait_for(planning, timeout=2)
+            after = json.loads(health.read_text())
+            assert after["planning"]["stage"] == "published"
+            assert after["planning"]["games_completed"] == 1
+        finally:
+            release.set()
+            stop.set()
+            planning.cancel()
+            await asyncio.gather(planning, heartbeat, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_worker_persists_loop_failure_and_closes_client_on_cancellation(tmp_path, monkeypatch):
+    from backend.trading import worker as worker_module
+    health = tmp_path / "worker.health.json"
+    monkeypatch.setattr(worker_module, "HEALTH_PATH", health)
+
+    class Venue:
+        last_error = None
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+    async def scenario():
+        venue = Venue()
+        worker = worker_module.Worker(Store(tmp_path / "worker.sqlite3"), CFG, venue, FakeInputs(book_now(T0)))
+
+        async def fail():
+            raise RuntimeError("test planning failure")
+
+        monkeypatch.setattr(worker, "loop_once", fail)
+        monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *args: None)
+        task = asyncio.create_task(worker.run())
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if health.exists():
+                    status = json.loads(health.read_text())
+                    if status["phase"] == "error":
+                        break
+            assert status["phase"] == "error"
+            assert status["last_error"] == "RuntimeError: test planning failure"
+            assert status["last_loop"] is None
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert venue.closed
+
+    asyncio.run(scenario())
 
 
 def test_missing_mc_never_falls_back_to_gb(tmp_path):
@@ -568,10 +718,10 @@ class FakeTransport:
         self.sent, self.edits, self.fail_after_send = {}, [], False
 
     async def find_existing(self, channel_id, pid, started_at):
-        return self.sent.get(pid)
+        return self.sent.get(receipt(pid))
 
     async def send(self, channel_id, embed, nonce):
-        pid = embed.footer.text.split("pub ")[-1]
+        pid = embed.footer.text.split(" · ")[-1]
         assert pid not in self.sent, "blind resend"
         self.sent[pid] = 555
         if self.fail_after_send:
@@ -586,7 +736,7 @@ class FakeAPI:
     def __init__(self, items):
         self.items, self.acks = items, []
 
-    async def paper_outbox(self):
+    async def paper_outbox(self, channels=None):
         return {"publications": [i for i in self.items if not any(a[0] == i["publication_id"] and a[1] == i["revision"]
                                                                    and a[2] for a in self.acks)]}
 
@@ -625,7 +775,7 @@ def test_paper_only_cannot_reach_order_submission():
         StrategyConfig(mode="LIVE")
     root = Path(__file__).resolve().parents[1] / "backend"
     for file in root.rglob("*.py"):
-        text = file.read_text()
+        text = file.read_text(encoding="utf-8")
         # The backend never issues an HTTP POST and never names an order route (route decorators are allowed).
         assert not re.search(r"/v1/orders|create[-_]?order|(client|httpx|session|venue)\.(post|put|delete)\(",
                              text, re.I), file

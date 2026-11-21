@@ -8,7 +8,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY frontend ./frontend
-RUN mkdir /data && chown app:app /data
+RUN chmod -R a+rX /app/backend /app/frontend \
+    && mkdir /data && chown app:app /data
 ENV NFL_DATA_DIR=/data OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
 USER app
 EXPOSE 8000
@@ -18,6 +19,7 @@ FROM base AS bot
 COPY bot/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot ./bot
-RUN mkdir /state && chown app:app /state
+RUN chmod -R a+rX /app/bot \
+    && mkdir /state && chown app:app /state
 USER app
 CMD ["python", "-m", "bot.discord_bot"]

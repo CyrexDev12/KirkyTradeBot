@@ -24,6 +24,8 @@ Every numeric strategy setting is an initial experiment setting. None of them is
 
 ## Setup
 
+For the existing live Azure installation, use [the VM update guide](../deploy/UPDATE_AZURE.md). Its updater generates the operator secret if needed, preserves existing data, and builds missing uncertainty profiles before starting the paper worker.
+
 1. Create the shared operator secret used by the backend and the bot:
    ```bash
    mkdir -p .secrets && openssl rand -hex 32 > .secrets/paper_operator_token.txt

@@ -19,9 +19,13 @@ import sqlite3
 import discord
 from discord import app_commands
 
+from .messages import timestamp
+
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto")
 MARKER = "pub "
+ROUTE_NAMES = {"crypto": "₿ BTC paper trades", "parlay": "🏈 Weekly NFL parlays",
+               "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
 
 def utcnow():
@@ -42,6 +46,7 @@ class PaperPosts:
                     revision INTEGER NOT NULL, channel_id INTEGER NOT NULL, message_id INTEGER,
                     started_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1, error TEXT,
                     PRIMARY KEY (guild_id, publication_id));
+                CREATE TABLE IF NOT EXISTS crypto_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
             """)
 
     def connect(self):
@@ -61,6 +66,28 @@ class PaperPosts:
         with closing(self.connect()) as db:
             return {r["kind"]: r["channel_id"] for r in
                     db.execute("SELECT * FROM paper_channels WHERE guild_id=?", (guild_id,))}
+
+    def configured_nfl_routes(self):
+        with closing(self.connect()) as db:
+            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind != 'crypto'")]
+
+    def configure_crypto(self, guild_id, channel_id, latest_event_id, *, parlay_channel_id=None):
+        with closing(self.connect()) as db, db:
+            db.execute("INSERT OR REPLACE INTO paper_channels VALUES (?,'crypto',?)", (guild_id, channel_id))
+            if parlay_channel_id is not None:
+                db.execute("INSERT OR REPLACE INTO paper_channels VALUES (?,'parlay',?)", (guild_id, parlay_channel_id))
+            # First subscription starts with the next event. Switching channels keeps any pending deliveries.
+            db.execute("INSERT OR IGNORE INTO crypto_cursors VALUES (?,?)", (guild_id, latest_event_id))
+
+    def crypto_routes(self):
+        with closing(self.connect()) as db:
+            return [dict(r) for r in db.execute(
+                "SELECT guild_id, channel_id, event_id FROM paper_channels JOIN crypto_cursors USING (guild_id) "
+                "WHERE kind='crypto'")]
+
+    def advance_crypto(self, guild_id, event_id):
+        with closing(self.connect()) as db, db:
+            db.execute("UPDATE crypto_cursors SET event_id=max(event_id, ?) WHERE guild_id=?", (event_id, guild_id))
 
     def post(self, guild_id, publication_id):
         with closing(self.connect()) as db:
@@ -92,6 +119,10 @@ def nonce(publication_id, guild_id):
     return hashlib.sha256(f"{guild_id}:{publication_id}".encode()).hexdigest()[:24]
 
 
+def receipt(publication_id):
+    return "#" + hashlib.sha256(publication_id.encode()).hexdigest()[:12]
+
+
 def publication_embed(payload: dict, publication_id: str | None = None) -> discord.Embed:
     embed = discord.Embed(title=payload["title"][:256], description=(payload.get("description") or "")[:4000],
                           colour=0x5EA5E0)
@@ -99,7 +130,7 @@ def publication_embed(payload: dict, publication_id: str | None = None) -> disco
         embed.add_field(name=str(name)[:256], value=str(value)[:1024] or "—", inline=False)
     footer = payload.get("footer") or "PAPER TRADING"
     if publication_id:
-        footer += f" · {MARKER}{publication_id}"
+        footer += f" · {receipt(publication_id)}"
     embed.set_footer(text=footer[:2048])
     return embed
 
@@ -110,7 +141,10 @@ class PaperPublisher:
         self.last_error = None
 
     async def tick(self):
-        items = (await self.api.paper_outbox()).get("publications", [])
+        channels = self.posts.configured_nfl_routes()
+        if not channels:
+            return
+        items = (await self.api.paper_outbox(channels=channels)).get("publications", [])
         for item in items:
             routes = self.posts.routes(item["channel"])
             if not routes:
@@ -126,12 +160,17 @@ class PaperPublisher:
             if errors:
                 self.last_error = f"Publication delivery failed ({', '.join(errors)})"
                 await self.api.paper_ack(item["publication_id"], item["revision"], None, ",".join(errors))
-            else:
+            elif item.get("status") != "delivered":
                 await self.api.paper_ack(item["publication_id"], item["revision"], ",".join(ids), None)
 
     async def deliver(self, route, item):
         guild_id, pid, revision = route["guild_id"], item["publication_id"], item["revision"]
         previous = self.posts.post(guild_id, pid)
+        # A newly chosen parlay channel gets the current card, even when the
+        # previous destination already received this week's publication.
+        if item.get("kind") == "weekly_parlay" and previous and previous["channel_id"] != route["channel_id"]:
+            pid = f"{pid}@{route['channel_id']}"
+            previous = self.posts.post(guild_id, pid)
         embed = publication_embed(item["payload"], pid)
         if previous and previous["message_id"]:
             if previous["revision"] >= revision:
@@ -166,10 +205,10 @@ class PaperTransport:
 
     async def find_existing(self, channel_id, publication_id, started_at):
         channel = await self.channel(channel_id)
-        marker = f"{MARKER}{publication_id}"
+        markers = (f" · {receipt(publication_id)}", f" · {MARKER}{publication_id}")
         async for message in channel.history(limit=None, after=started_at - timedelta(seconds=5)):
             if message.author.id == self.client.user.id and any(
-                    (e.footer.text or "").endswith(marker) for e in message.embeds):
+                    (e.footer.text or "").endswith(markers) for e in message.embeds):
                 return message.id
         return None
 
@@ -190,21 +229,18 @@ def _money(value):
 
 
 def account_text(a: dict) -> str:
-    lines = [f"**PAPER ACCOUNT** · equity **{_money(a['equity'])}** (started {_money(a['starting_equity'])})",
-             f"Cash {_money(a['cash'])} · reserved {_money(a['reserved'])} · available {_money(a['available_cash'])}",
-             f"Open liquidation value {_money(a['open_liquidation_value'])} · realized {_money(a['realized_pnl'])}"
-             f" · unrealized {_money(a['unrealized_pnl'])} · fees {_money(a['fees_paid'])}"]
+    lines = [f"🏈 **NFL paper account · {_money(a['equity'])}**",
+             f"Available {_money(a['available_cash'])} · set aside for orders {_money(a['reserved'])}",
+             f"Closed trades {_money(a['realized_pnl'])} · open trades {_money(a['unrealized_pnl'])} in gains/losses"]
     for p in a["positions"]:
-        lines.append(f"• `{p['trade_id']}` {p['selected_outcome']} {p['status']} qty {p['quantity']} · "
-                     f"cost {_money(p['cost_basis'])} · net liq {_money(p['net_liquidation_value'])}"
-                     + (" (provisional)" if p["provisional"] else ""))
+        lines.append(f"• {p['selected_outcome']} · {p['quantity']} shares worth {_money(p['net_liquidation_value'])} "
+                     f"· `{p['trade_id']}`")
     for w in a["working_entries"]:
-        lines.append(f"• `{w['trade_id']}` working entry (not a position) · {w['remaining']} @ "
-                     f"{float(w['limit']) * 100:.0f}¢ · reserved {_money(w['reserved'])}")
+        lines.append(f"• Waiting to buy {w['remaining']} shares at {float(w['limit']) * 100:.0f}¢ · `{w['trade_id']}`")
     if a.get("paused"):
         lines.append(f"New entries paused: {a.get('pause_reason')}. Exits are still monitored.")
     if a.get("provisional"):
-        lines.append("Some marks are stale or incomplete; values are provisional.")
+        lines.append("⏳ Some prices are delayed. The account value may change.")
     return "\n".join(lines)[:1900]
 
 
@@ -213,6 +249,16 @@ def register_paper_commands(bot, posts: PaperPosts):
 
     async def reply(interaction, text=None, embed=None):
         await interaction.followup.send(text, embed=embed, ephemeral=True)
+
+    @tree.command(name="parlay", description="See Kirkey’s weekly NFL parlays, leg odds, hit chances and payout multipliers")
+    @app_commands.guild_only()
+    async def parlay(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        data = await api.paper("/parlay")
+        if data.get("card"):
+            await reply(interaction, embed=publication_embed(data["card"]))
+        else:
+            await reply(interaction, data.get("message") or "This week’s parlays are still cooking. 🥩")
 
     @tree.command(name="picks", description="This week's paper-trading plans and their status")
     @app_commands.guild_only()
@@ -223,22 +269,27 @@ def register_paper_commands(bot, posts: PaperPosts):
             await reply(interaction, data.get("message") or "No weekly plan yet.")
             return
         s = data["summary"]
-        lines = [s["headline"], f"{s['qualifying_trades']} qualifying · equity {_money(s['equity'])}"]
+        lines = [s["headline"], f"Paper account **{_money(s['equity'])}**"]
         for t in data["trades"]:
-            lines.append(f"• `{t['trade_id']}` {t['selected_outcome']} {t['market_type']} · **{t['status']}** · "
+            total = f" {t['total_line']}" if t.get("total_line") is not None else ""
+            game = t["game_id"].split("_")
+            matchup = f"{game[2]} at {game[3]}" if len(game) == 4 else t["game_id"]
+            lines.append(f"• {matchup} · **{t['selected_outcome']}{total}** · {t['status'].replace('_', ' ').lower()} · "
                          f"entry {float(t['entry_limit']) * 100:.0f}¢ → target {float(t['target_limit']) * 100:.0f}¢ "
-                         f"/ stop {float(t['stop_trigger']) * 100:.0f}¢ · qty {t['quantity']}")
-        await reply(interaction, embed=discord.Embed(title=f"PAPER PICKS · {data['plan_key']}",
+                         f"/ stop {float(t['stop_trigger']) * 100:.0f}¢ · `{t['trade_id']}`")
+        await reply(interaction, embed=discord.Embed(title=f"🏈 Kirkey’s paper picks · Week {data['week']}, {data['season']}",
                                                      description="\n".join(lines)[:4000], colour=0x5EA5E0))
 
-    @tree.command(name="trade", description="Exact terms, model values, rating components and history of a paper trade")
+    @tree.command(name="trade", description="See a paper pick’s prices, grade and recent activity")
     @app_commands.guild_only()
     async def trade(interaction: discord.Interaction, trade_id: str):
         await interaction.response.defer(ephemeral=True, thinking=True)
         data = await api.paper(f"/trades/{trade_id}")
-        history = "\n".join(f"{e['ts'][:16]} {e['type']}" for e in data["history"][-10:]) or "No paper orders yet."
+        history = "\n".join(f"<t:{int(datetime.fromisoformat(e['ts']).timestamp())}:t> · "
+                            f"{e['type'].replace('_', ' ').lower()}" for e in data["history"][-5:])
         card = dict(data["card"])
-        card["fields"] = list(card["fields"]) + [("History", history)]
+        if history:
+            card["fields"] = list(card["fields"]) + [("Recent activity", history)]
         await reply(interaction, embed=publication_embed(card))
 
     @tree.command(name="account", description="Paper account cash, reservations, equity and open positions")
@@ -254,27 +305,26 @@ def register_paper_commands(bot, posts: PaperPosts):
         data = await api.paper("/performance")
         p, a = data["performance"], data["account"]
         change = float(a["equity"]) - float(a["starting_equity"])
-        text = (f"**PAPER PERFORMANCE** · equity {_money(a['equity'])} ({_money(change)} since $100 start)\n"
-                f"Closed {p['closed_trades']} · wins {p['wins']} · losses {p['losses']} · expectancy "
-                f"{p['expectancy'] or '—'} · max drawdown {float(p['max_drawdown']):.1%}\n"
-                f"Entries {p['entries']} · any fill {p['entries_any_fill']} · full fill {p['entries_full_fill']}\n"
-                f"Exits {p['exit_outcomes'] or 'none'} · fees {_money(p['fees'])} · data outages {p['outages']}\n"
-                "Past paper results are not evidence of future profitability.")
+        record = (f"{p['wins']}/{p['closed_trades']} closed trades won ({p['wins']/p['closed_trades']:.0%})"
+                  if p["closed_trades"] else "Waiting for the first closed trade.")
+        text = (f"📋 **NFL paper scorecard · {_money(a['equity'])}**\n"
+                f"{record}\nChange since start **{_money(change)}** · fees {_money(p['fees'])}\n"
+                f"Largest drop from a previous high {float(p['max_drawdown']):.1%}")
         await reply(interaction, text)
 
-    @tree.command(name="why-no-trades", description="Gate failures and data-readiness status for the paper strategy")
+    @tree.command(name="why-no-trades", description="See what kept NFL picks off the board")
     @app_commands.guild_only()
     async def why_no_trades(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         data = await api.paper("/why-no-trades")
         r = data["readiness"]
-        lines = [f"Recorded market-path examples: {r['path_examples']}",
-                 f"Forward validation: {'passed' if (r['validation'] or {}).get('passed') else 'not passed / not run'}",
-                 f"Model-uncertainty profiles: {'present' if r['uncertainty_profiles'] else 'missing'}"]
-        if data.get("summary"):
-            lines.insert(0, data["summary"]["headline"])
-        for code, info in list((data.get("gate_failures") or {}).items())[:8]:
-            lines.append(f"• {code} ×{info['count']} — {info['meaning']}")
+        lines = ["🏈 **NFL pick check**", (data.get("summary") or {}).get("headline") or
+                 "Waiting for the first weekly scan."]
+        failures = (data.get("gate_failures") or {}).values()
+        for info in list(failures)[:3]:
+            lines.append(f"• {info['count']} skipped · {info['meaning']}")
+        if not r["uncertainty_profiles"]:
+            lines.append("The model’s error estimates are still being prepared.")
         await reply(interaction, "\n".join(lines)[:1900])
 
     @tree.command(name="health", description="Paper worker, feed freshness and pending posts")
@@ -285,12 +335,22 @@ def register_paper_commands(bot, posts: PaperPosts):
         worker = data.get("worker") or {}
         ages = data.get("feed_age_seconds") or {}
         newest = min(ages.values()) if ages else None
-        await reply(interaction,
-                    f"Mode {data['mode']} · worker last loop {worker.get('last_loop') or 'never'}\n"
-                    f"Freshest book age {f'{newest:.0f}s' if newest is not None else '—'} across {len(ages)} markets\n"
-                    f"Pending posts {data['pending_publications']} · last planning run "
-                    f"{data['last_planning_run'] or 'none'} · paused {data['paused']}\n"
-                    f"Last worker error: {worker.get('last_error') or 'none'}")
+        planning = worker.get("planning") or {}
+        lines = ["🏈 **NFL paper desk**" + (" · entries paused" if data["paused"] else ""),
+                 f"Last check {timestamp(worker['last_heartbeat'], 'R')}" if worker.get("last_heartbeat")
+                 else "Waiting for the first worker check."]
+        if planning:
+            lines.append(f"Scanning games · {planning.get('games_completed', 0)}/{planning.get('games_total', 0)} "
+                         f"checked · {planning.get('books_received', 0)}/{planning.get('books_requested', 0)} prices received")
+        if newest is not None:
+            lines.append(f"Freshest market quote {newest:.0f}s ago · {len(ages)} markets tracked")
+        if data["last_planning_run"]:
+            lines.append(f"Last plan {timestamp(data['last_planning_run'], 'R')}")
+        lines.append(f"{data['pending_publications']} posts waiting to go out.")
+        for label, key in (("Latest issue", "last_error"), ("Market data issue", "venue_error")):
+            if worker.get(key):
+                lines.append(f"{label} · {str(worker[key])[:300]}")
+        await reply(interaction, "\n".join(lines))
 
     @tree.command(name="paper-pause", description="Stop new paper entries (exits keep running)")
     @app_commands.guild_only()
@@ -310,23 +370,59 @@ def register_paper_commands(bot, posts: PaperPosts):
         await api.paper_operator("/resume", {"actor": str(interaction.user.id)})
         await reply(interaction, "New paper entries resumed.")
 
-    group = app_commands.Group(name="paper-channels", description="Route paper-trading posts to channels",
+    group = app_commands.Group(name="paper-channels", description="Choose where NFL and BTC updates are posted",
                                guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
 
-    @group.command(name="set", description="Choose the channel for weekly picks, trade updates or account reports")
+    def channel_issue(interaction, channel):
+        if channel.guild.id != interaction.guild_id:
+            return "Choose a text channel in this server."
+        perms = channel.permissions_for(interaction.guild.me)
+        missing = [n.replace("_", " ") for n in ("view_channel", "send_messages", "embed_links", "read_message_history")
+                   if not getattr(perms, n)]
+        if missing:
+            return f"To post in {channel.mention}, I need " + ", ".join(missing) + "."
+
+    @group.command(name="setup", description="Pick the channels for BTC trades and the weekly NFL parlay board")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def setup_channels(interaction: discord.Interaction, crypto: discord.TextChannel, parlay: discord.TextChannel):
+        for channel in (crypto, parlay):
+            issue = channel_issue(interaction, channel)
+            if issue:
+                await interaction.response.send_message(issue, ephemeral=True)
+                return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        account = await api.crypto("/account")
+        posts.configure_crypto(interaction.guild_id, crypto.id, account["latest_id"], parlay_channel_id=parlay.id)
+        await reply(interaction, f"🥩 Grill’s ready!\n₿ BTC entries, exits and skips → {crypto.mention}"
+                                 f"\n🏈 Weekly parlay board → {parlay.mention}")
+
+    @group.command(name="show", description="See which channels receive Beef Kirkey's updates")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def show_channels(interaction: discord.Interaction):
+        configured = posts.channels(interaction.guild_id)
+        lines = [name + " → " + (f"<#{configured[kind]}>" if kind in configured else "Choose a channel")
+                 for kind, name in ROUTE_NAMES.items()]
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @group.command(name="set", description="Choose a channel for NFL picks, updates, reports, the weekly parlay, or BTC paper trades")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.choices(kind=[app_commands.Choice(name=k, value=k) for k in KINDS])
     async def set_channel(interaction: discord.Interaction, kind: app_commands.Choice[str], channel: discord.TextChannel):
-        if channel.guild.id != interaction.guild_id:
-            await interaction.response.send_message("Choose a text channel in this server.", ephemeral=True)
+        issue = channel_issue(interaction, channel)
+        if issue:
+            await interaction.response.send_message(issue, ephemeral=True)
             return
-        perms = channel.permissions_for(interaction.guild.me)
-        missing = [n for n in ("view_channel", "send_messages", "embed_links", "read_message_history")
-                   if not getattr(perms, n)]
-        if missing:
-            await interaction.response.send_message("The bot needs: " + ", ".join(missing), ephemeral=True)
+        if kind.value == "crypto":
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            account = await api.crypto("/account")
+            posts.configure_crypto(interaction.guild_id, channel.id, account["latest_id"])
+            await reply(interaction, f"₿ BTC paper entries, exits and skips will post in {channel.mention}.")
             return
         posts.set_channel(interaction.guild_id, kind.value, channel.id)
+        if kind.value == "parlay":
+            await interaction.response.send_message(f"🏈 Weekly parlay boards will post in {channel.mention}. "
+                                                    "See the latest with /parlay.", ephemeral=True)
+            return
         await interaction.response.send_message(f"Paper {kind.value} will post in {channel.mention}.", ephemeral=True)
 
     tree.add_command(group)

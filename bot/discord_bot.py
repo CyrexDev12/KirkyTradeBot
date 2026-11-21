@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import tasks
 
 from .api import PredictionAPI
+from .crypto import CryptoPublisher, register_crypto_commands
 from .messages import matchup_embed, timestamp, week_embed
 from .paper import PaperPosts, PaperPublisher, PaperTransport, register_paper_commands
 from .scheduler import AlertScheduler, utcnow
@@ -93,9 +94,11 @@ class NFLBot(discord.Client):
         self.scheduler = AlertScheduler(api, store, DiscordTransport(self))
         self.paper_posts = PaperPosts(store.path)
         self.paper_publisher = PaperPublisher(api, self.paper_posts, PaperTransport(self))
+        self.crypto_publisher = CryptoPublisher(api, self.paper_posts, self.paper_publisher)
         self.tree.on_error = report_error
         self.register_commands()
         register_paper_commands(self, self.paper_posts)
+        register_crypto_commands(self)
 
     async def setup_hook(self):
         if self.guild_id:
@@ -105,9 +108,11 @@ class NFLBot(discord.Client):
         else:
             await self.tree.sync()
         self.post_alerts.start()
+        self.post_crypto.start()
 
     async def close(self):
         self.post_alerts.cancel()
+        self.post_crypto.cancel()
         await self.api.close()
         await super().close()
 
@@ -131,6 +136,11 @@ class NFLBot(discord.Client):
     @post_alerts.before_loop
     async def before_alerts(self):
         await self.wait_until_ready()
+
+    @tasks.loop(seconds=30)
+    async def post_crypto(self):
+        if self.is_ready():
+            await self.crypto_publisher.tick()
 
     async def show_game(self, interaction, game_id):
         payload = await self.api.forecast(game_id)
@@ -196,19 +206,13 @@ class NFLBot(discord.Client):
         @app_commands.guild_only()
         async def help_command(interaction: discord.Interaction):
             await interaction.response.send_message(
-                "**/weeklymatchup** — choose a game using its button\n"
-                "**/matchup** — select a game with autocomplete\n"
-                "**/nextgame** — next kickoff within seven days\n"
-                "**/botstatus** — backend and alert status\n"
-                "**/alerts setup** — choose a channel and lead time (Manage Server)\n"
-                "**/alerts disable** — stop automatic posts (Manage Server)\n"
-                "**/picks · /trade · /account · /performance · /why-no-trades · /health** — PAPER trading account\n"
-                "**/paper-channels set · /paper-pause · /paper-resume** — paper routing and entry controls (Manage Server)\n\n"
-                "Existing-model win probabilities exclude ties. Monte Carlo shows home wins, away wins and final ties "
-                "separately, with a conditional comparison. Its score model is experimental. "
-                "Early-season and postseason games can have unavailable MC forecasts. "
-                "Matchup buttons stay active for 15 minutes. Run /weeklymatchup again to refresh them. "
-                "Paper trades are simulated with a $100 paper account; nothing is sent to an exchange.",
+                "🥩 **Beef Kirkey’s menu**\n"
+                "🏈 **NFL** · Pick a game with /weeklymatchup or see this week’s parlay board with /parlay.\n"
+                "📋 **NFL paper desk** · /picks for plays, /account for the balance, /performance for results.\n"
+                "₿ **BTC paper desk** · /crypto-trades for the play-by-play, /crypto-stats for the win rate "
+                "and patterns, /crypto-account for the balance.\n"
+                "📣 **Server managers** · /paper-channels setup picks the BTC and parlay channels. "
+                "/paper-channels show lists them. /alerts setup turns on pregame predictions.",
                 ephemeral=True)
 
         alerts = app_commands.Group(name="alerts", description="Configure this server's pregame prediction posts",

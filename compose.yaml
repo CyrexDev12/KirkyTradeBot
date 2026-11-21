@@ -1,6 +1,8 @@
 name: nfl-fair-value
 services:
   backend:
+    image: nfl-fair-value-backend:latest
+    pull_policy: never
     build:
       context: .
       target: backend
@@ -78,11 +80,35 @@ services:
     volumes:
       - predictions:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,time,datetime,pathlib; s=json.loads(pathlib.Path('/data/trading/worker.health.json').read_text()); assert (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(s['last_loop'])).total_seconds()<180"]
+      test: ["CMD", "python", "-c", "import json,datetime,pathlib; s=json.loads(pathlib.Path('/data/trading/worker.health.json').read_text()); assert s.get('phase') != 'error'; assert (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(s.get('last_heartbeat') or s['last_loop'])).total_seconds()<180"]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  crypto-worker:
+    image: nfl-fair-value-backend:latest
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "backend.crypto.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NFL_DATA_DIR: /data
+    volumes:
+      - predictions:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import datetime as dt,json,pathlib; h=json.loads(pathlib.Path('/data/crypto/health.json').read_text()); assert (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(h['last_heartbeat'])).total_seconds()<180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
     logging:
       driver: json-file
       options:

@@ -2,6 +2,8 @@
 
 The bot is configured for application `1572302708419985518` and server `1572300706478817441`. Its default alert time is 30 minutes before kickoff. Set the destination channel after deployment with `/alerts setup`.
 
+**Updating the live Mexico Central VM:** use [UPDATE_AZURE.md](UPDATE_AZURE.md) and `deploy/azure/update.sh`. This preserves the existing Discord token and runtime data, adds the paper worker, and does not reprovision the VM. The instructions below primarily cover creating a new installation.
+
 ## Deploy yourself using Azure Cloud Shell
 
 This route uses the Azure account you sign into through the portal. The prepared bundle is `.deploy/nfl-discord-azure.zip` in the project directory. It contains the application and deployment files. The token is entered separately at a hidden prompt.
@@ -27,7 +29,7 @@ bash deploy/azure/deploy.sh YOUR_SUBSCRIPTION_ID --plan
 bash deploy/azure/deploy.sh YOUR_SUBSCRIPTION_ID
 ```
 
-The default deployment uses Canada Central (`canadacentral`) and creates a resource group named `nfl-fair-value-rg` if it does not already exist, an Ubuntu 24.04 VM named `nfl-fair-value`, a `Standard_B2as_v2` size with 2 vCPUs and 8 GiB memory, a 128 GiB Standard SSD OS disk, a public IPv4 address, and a virtual network. Compute, disk, IP, and network use count toward your subscription's billing and credits. Check the estimate for this configuration in the Azure pricing calculator. School subscription policies and available regional quota determine whether deployment is permitted. [Azure VM specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/basv2-series), [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator/)
+The default new deployment uses Mexico Central (`mexicocentral`) and creates a resource group named `nfl-fair-value-rg` if it does not already exist, an Ubuntu 24.04 VM named `nfl-fair-value`, a `Standard_B2s_v2` size with 2 vCPUs and 8 GiB memory, a 128 GiB Standard SSD OS disk, a public IPv4 address, and a virtual network. Compute, disk, IP, and network use count toward your subscription's billing and credits. Check the estimate for this configuration in the Azure pricing calculator. School subscription policies and available regional quota determine whether deployment is permitted. [Azure VM specifications](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/bsv2-series), [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator/)
 
 The preview creates the empty resource group and an SSH key if needed, validates the template with Azure, then runs Azure's what-if operation. A validation failure stops the script before VM deployment or the token prompt. Successful validation does not reserve VM capacity. The deployment opens SSH to the current Cloud Shell IPv4 address. The bot connects outward to Discord. The dashboard binds to the VM's loopback address. The script prints the SSH command when finished. [Azure template validation](https://learn.microsoft.com/en-us/cli/azure/deployment/group#az-deployment-group-validate)
 
@@ -35,14 +37,14 @@ To change supported deployment settings before running the script, set `NFL_RESO
 
 ## Retry after the region-policy error
 
-The subscription's permitted regions reported on November 17, 2026 are `francecentral`, `belgiumcentral`, `germanywestcentral`, `canadacentral`, and `mexicocentral`. The updated scripts default to `canadacentral`. The `bicep.use_binary_from_path` configuration message is informational; the reported deployment blocker was `RequestDisallowedByAzure` for West US 2.
+The subscription's permitted regions reported on November 17, 2026 are `francecentral`, `belgiumcentral`, `germanywestcentral`, `canadacentral`, and `mexicocentral`. Mexico Central was the successful region and is now the default. The `bicep.use_binary_from_path` configuration message is informational; the original deployment blocker was `RequestDisallowedByAzure` for West US 2.
 
 Upload the updated `nfl-discord-azure.zip` to Cloud Shell's home directory. At a **PowerShell** prompt such as `PS /home/luke/nfl-discord>`, run:
 
 ```powershell
 unzip -o "$HOME/nfl-discord-azure.zip" -d "$HOME/nfl-discord"
 Set-Location "$HOME/nfl-discord"
-$env:NFL_AZURE_LOCATION = 'canadacentral'
+$env:NFL_AZURE_LOCATION = 'mexicocentral'
 $subscriptionId = az account show --query id -o tsv
 if ($LASTEXITCODE -ne 0) { throw 'Select your school subscription before continuing.' }
 bash deploy/azure/deploy.sh $subscriptionId --plan
@@ -54,7 +56,7 @@ If the preview succeeds and its changes are correct, deploy:
 bash deploy/azure/deploy.sh $subscriptionId
 ```
 
-In **Bash** Cloud Shell, the equivalent region setting is `export NFL_AZURE_LOCATION=canadacentral`. The Windows deployment script accepts `-Location canadacentral`.
+In **Bash** Cloud Shell, the equivalent region setting is `export NFL_AZURE_LOCATION=mexicocentral`. The Windows deployment script accepts `-Location mexicocentral`.
 
 The updated scripts reuse the existing resource group, including one created in West US 2 by the failed attempt. Its metadata location can differ from the location of the VM and network resources. [Azure resource group locations](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/manage-resource-groups-portal#what-is-a-resource-group)
 
@@ -145,13 +147,13 @@ Connect with the SSH command printed by the deployment, then use these commands 
 ```bash
 cd ~/nfl-fair-value
 sudo docker compose ps
-sudo docker compose logs --tail 100 backend bot paper-worker
+sudo docker compose logs --tail 100 backend bot paper-worker crypto-worker
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
 The backend health check verifies the HTTP process. The bot health check verifies that its connected scheduler is checking in. Forecast availability is visible in matchup replies. A process exit triggers Docker's restart policy. A persistent unhealthy status requires investigation through the logs.
 
-For an application update, upload the latest bundle and rerun the deployment script using the same resource group and SSH key. The named volumes retain existing forecasts and alert settings. To rotate the token, rerun the deployment and enter the replacement token at the hidden prompt.
+For an application update, follow [UPDATE_AZURE.md](UPDATE_AZURE.md). Use the existing-VM updater so the region, VM size, token, and persisted state are retained. After manually replacing a token file on the VM, recreate the bot container with `sudo docker compose up -d --no-deps --force-recreate --wait bot` so its secret mount is refreshed.
 
 SSH is restricted to the source address used during deployment. If Cloud Shell gets a new public address, rerunning the deployment updates that rule. Network access to Discord, NFLverse/GitHub, Docker's package repository, Docker Hub, and Python's package index is required for setup and operation.
 

@@ -12,17 +12,17 @@ from decimal import Decimal
 from .common import ZERO, D, utc
 
 CODE_TEXT = {
-    "INSUFFICIENT_EXECUTION_HISTORY": "insufficient market-path history to estimate scalp outcomes",
+    "INSUFFICIENT_EXECUTION_HISTORY": "we need more price history to judge when a trade could exit",
     "MC_UNAVAILABLE": "Monte Carlo forecast unavailable",
     "GB_UNAVAILABLE": "gradient-boosting forecast unavailable",
-    "UNSUPPORTED_UNCERTAINTY": "no documented model-uncertainty treatment for this market",
+    "UNSUPPORTED_UNCERTAINTY": "the models don’t have a reliable range for this market yet",
     "UNSUPPORTED_SETTLEMENT": "settlement rule not supported",
     "STALE_MARKET_DATA": "market data not fresh enough",
-    "UNKNOWN_INCREMENTS": "venue tick/quantity increments not verified",
-    "NO_LISTED_MARKET": "no verified listed contract",
-    "NO_MODEL_CONSENSUS": "models do not both support the contract after costs",
-    "NEGATIVE_NET_EXPECTANCY": "insufficient net edge after costs",
-    "INSUFFICIENT_LIQUIDITY": "inadequate liquidity",
+    "UNKNOWN_INCREMENTS": "we couldn’t verify the permitted order size or price",
+    "NO_LISTED_MARKET": "we couldn’t find a matching market",
+    "NO_MODEL_CONSENSUS": "the two models didn’t agree on a pick after costs",
+    "NEGATIVE_NET_EXPECTANCY": "the price left too little upside after costs",
+    "INSUFFICIENT_LIQUIDITY": "too few shares were available at the quoted price",
     "PORTFOLIO_LIMIT": "portfolio limits",
     "RATING_BELOW_MINIMUM": "rating below 6.5",
     "RATING_UNAVAILABLE": "rating evidence incomplete",
@@ -44,10 +44,6 @@ def _c(value) -> str:
     return cents_text(value) if value is not None else "—"
 
 
-def _pct(value) -> str:
-    return f"{D(value) * 100:.0f}%" if value is not None else "—"
-
-
 def money(value) -> str:
     v = D(value)
     return f"-${abs(v):,.2f}" if v < 0 else f"${v:,.2f}"
@@ -57,33 +53,29 @@ def cents_text(value) -> str:
     return f"{D(value) * 100:.1f}".rstrip("0").rstrip(".") + "¢"
 
 
+def matchup_name(game_id: str) -> str:
+    parts = game_id.split("_")
+    return f"{parts[2]} at {parts[3]}" if len(parts) == 4 else game_id
+
+
 def no_trade_text(primary: Counter | dict) -> str:
     top = next(iter(primary), None) if primary else None
-    if top == "INSUFFICIENT_EXECUTION_HISTORY":
-        return "No rated trades this week — insufficient market-path history to estimate scalp outcomes."
     if top:
-        return f"No rated trades this week — could not fully evaluate: {CODE_TEXT.get(top, top)}."
-    return "No rated trades this week."
+        return f"Kirkey’s sitting out this week — {CODE_TEXT.get(top, top.lower().replace('_', ' '))}."
+    return "Kirkey’s sitting out this week."
 
 
 def plan_publication(key: str, summary: dict, payload: dict, cfg) -> dict:
-    lines = [summary["headline"],
-             f"{summary['qualifying_trades']} qualifying trades; {money(summary['equity'])} equity; "
-             f"{money(summary['available_cash'])} available cash."]
-    reasons = [CODE_TEXT.get(c, c) for c in summary["primary_reasons"]][:3]
-    if reasons and not summary["qualifying_trades"]:
-        lines.append("Main reasons: " + "; ".join(reasons) + ".")
-    if summary["could_not_evaluate"]:
-        lines.append(f"{summary['could_not_evaluate']} candidate contracts could not be evaluated "
-                     f"(missing evidence), {summary['evaluated_unattractive']} were evaluated and rejected.")
+    lines = [summary["headline"], f"Paper balance **{money(summary['equity'])}** · "
+             f"{money(summary['available_cash'])} available"]
     for t in payload["trades"]:
-        lines.append(f"• `{t['trade_id']}` {t['selected_outcome']} {t['market_type']} — entry {cents_text(t['entry_limit'])}, "
-                     f"target {cents_text(t['target_limit'])}, stop {cents_text(t['stop_trigger'])}, "
-                     f"qty {t['quantity']}")
+        line = f" {t['total_line']}" if t.get("total_line") is not None else ""
+        lines.append(f"• {matchup_name(t['game_id'])} · **{t['selected_outcome']}{line}** · {cents_text(t['entry_limit'])} entry · "
+                     f"{cents_text(t['target_limit'])} target · {cents_text(t['stop_trigger'])} stop · `{t['trade_id']}`")
     return {"publication_id": f"plan:{key}", "kind": "weekly_plan", "channel": "picks", "revision": 1,
-            "payload": {"title": f"NFL weekly paper portfolio · {payload['season']} week {payload['week']}",
+            "payload": {"title": f"🏈 Kirkey’s paper picks · Week {payload['week']}, {payload['season']}",
                         "description": "\n".join(lines),
-                        "footer": f"PAPER TRADING · {key} · config {cfg.version}"}}
+                        "footer": "Beef Kirkey · NFL paper trading"}}
 
 
 def trade_card(plan, status: str, reason: str | None = None) -> dict:
@@ -91,47 +83,25 @@ def trade_card(plan, status: str, reason: str | None = None) -> dict:
     p = plan.to_dict() if hasattr(plan, "to_dict") else plan
     meta = p.get("meta") or {}
     gb, mc = meta.get("gb") or {}, meta.get("mc") or {}
-    est = meta.get("path_estimate") or {}
     rating = meta.get("rating") or {}
     market = p["market_type"] + (f" {p['total_line']}" if p.get("total_line") else "")
-    owned = status in ("OPEN", "PARTIALLY_FILLED", "FILLED", "EXIT_WORKING", "PARTIALLY_CLOSED",
-                       "SETTLEMENT_PENDING")
+    label = {"PROPOSED": "Entry planned", "WORKING": "Waiting to buy", "EXIT_WORKING": "Waiting to sell",
+             "PARTIALLY_FILLED": "Partly filled", "PARTIALLY_CLOSED": "Partly sold"}.get(
+                 status, status.replace("_", " ").title())
     fields = [
-        ("Contract", f"{p['game_id']} · {market} · **{p['selected_outcome']}** ({p['selected_side']} side)\n"
-                     f"Kickoff {ts(p['kickoff'])}"),
-        ("Plan", f"Entry limit **{cents_text(p['entry_limit'])}** · target **{cents_text(p['target_limit'])}** "
-                 f"({D(p['target_limit']) / D(p['entry_limit']):.2f}×) · "
-                 f"stop trigger **{cents_text(p['stop_trigger'])}**\nEntry expires {ts(p['entry_expires_at'])} · "
-                 f"time exit {ts(p['exit_deadline'])}\nHolding policy {p['hold_policy']}"),
-        ("Size and risk", f"Quantity {p['quantity']} · est. all-in cash {money(p['estimated_entry_cost'])}\n"
-                          f"Stressed stop loss {money(p['planned_loss'])} · full funded loss "
-                          f"{money(p['full_funded_loss'])}"),
-        ("Pregame model values (separate)",
-         f"GB {_c(gb.get('fair_value'))} (range {_c(gb.get('lower'))}–{_c(gb.get('upper'))})\n"
-         f"MC {_c(mc.get('fair_value'))} (range {_c(mc.get('lower'))}–{_c(mc.get('upper'))})"),
+        ("Game", f"{matchup_name(p['game_id'])} · kickoff {ts(p['kickoff'])}"),
+        ("Price plan", f"Buy up to **{cents_text(p['entry_limit'])}** · 🎯 {cents_text(p['target_limit'])} target · "
+                       f"🛑 {cents_text(p['stop_trigger'])} stop\nEntry expires {ts(p['entry_expires_at'])} · "
+                       f"exit deadline {ts(p['exit_deadline'])}"),
+        ("Paper stake", f"{p['quantity']} shares · estimated cost **{money(p['estimated_entry_cost'])}**\n"
+                        f"Estimated loss at stop {money(p['planned_loss'])} · maximum loss {money(p['full_funded_loss'])}"),
+        ("Model prices", f"Gradient {_c(gb.get('fair_value'))} · Monte Carlo {_c(mc.get('fair_value'))}"),
     ]
-    if est.get("status") in ("supported", "modeled"):
-        probs = est.get("state_probabilities") or {}
-        label = "Path estimate (conditional on fill)" if est.get("status") == "supported" else \
-            "Modeled path estimate (no recorded history yet)"
-        order = ("TARGET", "STOP", "TIME", "SETTLEMENT", "MIXED", "CENSORED")
-        parts = [f"{k.lower()} {_pct(probs[k])}" for k in order if probs.get(k) is not None and D(probs[k]) > 0]
-        fields.append((label,
-                       f"Chance of reaching: {' · '.join(parts)}\n"
-                       f"Expected net return {_pct(est.get('expected_return'))} · conservative {_pct(est.get('lower_return'))}"
-                       + (f" · {est.get('games')} games / {est.get('weeks')} weeks" if est.get('status') == 'supported' else "")))
-    else:
-        fields.append(("Path estimate", "Unavailable — not shown"))
-    comps = rating.get("components") or {}
-    fields.append(("Rating", f"**{rating.get('value')}/10** ({rating.get('version')}) — not a probability of profit\n"
-                             + " · ".join(f"{k.replace('_', ' ')} {D(v):.2f}" if v is not None else f"{k} —"
-                                          for k, v in comps.items())))
-    title_status = status if not owned else f"{status} position"
-    if status in ("PROPOSED", "WORKING"):
-        title_status = f"{status} ENTRY (not a position)"
-    return {"title": f"PAPER TRADE | {p['trade_id']} | {title_status}", "status": status, "reason": reason,
+    if rating.get("value") is not None:
+        fields.append(("Kirkey’s grade", f"**{rating['value']}/10**"))
+    return {"title": f"🏈 {p['selected_outcome']} · {market} · {label}", "status": status, "reason": reason,
             "revision": p.get("revision", 1), "fields": fields,
-            "footer": f"PAPER TRADE · {p['trade_id']} · {p['strategy_id']} · quotes as of {meta.get('quote_as_of')}"}
+            "footer": f"Beef Kirkey · NFL paper trade {p['trade_id']}"}
 
 
 def trade_card_publication(plan, status, reason, cfg, revision: int = 1) -> dict:
@@ -149,11 +119,11 @@ def lifecycle_alerts(events: list[dict]) -> list[dict]:
         t, tid = e["type"], e.get("trade_id")
         text = None
         if t == "ENTRY_WORKING":
-            text = f"`{tid}` paper entry working (cash reserved {money(e['reserve'])}; not a position yet)."
+            text = f"`{tid}` · Waiting to buy. {money(e['reserve'])} set aside."
         elif t == "ENTRY_FILL":
-            text = f"`{tid}` paper entry filled {e['quantity']} @ {cents_text(e['price'])} (fee {money(e['fee'])})."
+            text = f"`{tid}` · Bought **{e['quantity']} shares at {cents_text(e['price'])}** · fee {money(e['fee'])}."
         elif t == "ENTRY_CLOSED":
-            text = f"`{tid}` remaining entry {e['status'].lower()}: {e['reason']}. Reservation released."
+            text = f"`{tid}` · Remaining order {e['status'].lower()}. Unused cash is available again."
         elif t == "EXIT_ACTIVATED" and e["mode"] != "TARGET":
             text = f"`{tid}` {e['mode'].lower()} exit activated."
         elif t == "EXIT_FILL":
@@ -162,13 +132,13 @@ def lifecycle_alerts(events: list[dict]) -> list[dict]:
         elif t == "SETTLED":
             text = f"`{tid}` settled {e['quantity']} @ {money(e['payout'])} (realized {money(e['realized'])})."
         elif t == "SETTLEMENT_PENDING":
-            text = f"`{tid}` market resolved; settlement pending verification."
+            text = f"`{tid}` · Game over. Waiting to confirm the payout."
         elif t == "OUTAGE":
             text = f"Market data gap on {e['slug']} ({e['seconds']:.0f}s). No fills were simulated in the gap."
         if text:
             out.append({"publication_id": f"alert:{e['event_id']}", "kind": "trade_alert", "channel": "updates",
-                        "revision": 1, "payload": {"title": "Paper trade update", "description": text,
-                                                   "footer": "PAPER TRADING"}})
+                        "revision": 1, "payload": {"title": "🏈 NFL trade update", "description": text,
+                                                   "footer": "Beef Kirkey · NFL paper trading"}})
     return out
 
 
@@ -177,37 +147,25 @@ def weekly_report(account: dict, start_equity: Decimal, season: int, week: int, 
     end = D(account["equity"])
     change = end - start_equity
     ret = change / start_equity if start_equity else None
-    exits = Counter()
     fees = ZERO
-    worst = ZERO
     for e in events:
-        if e["type"] in ("EXIT_FILL", "SETTLED"):
-            exits[e.get("reason", "SETTLEMENT")] += 1
-            worst = min(worst, D(e["realized"]))
         if e["type"] in ("ENTRY_FILL", "EXIT_FILL"):
             fees += D(e["fee"])
-    entries = Counter(e["status"] for e in events if e["type"] == "ENTRY_CLOSED")
     filled = len({e["trade_id"] for e in events if e["type"] == "ENTRY_FILL"})
     lines = [
-        f"Equity {money(start_equity)} → **{money(end)}** ({money(change)}"
+        f"Account value {money(start_equity)} → **{money(end)}** ({money(change)}"
         + (f", {ret:+.2%})" if ret is not None else ")"),
-        f"Cash {money(account['cash'])} · reserved {money(account['reserved'])} · available "
-        f"{money(account['available_cash'])} · open liquidation value {money(account['open_liquidation_value'])}",
-        f"Realized {money(account['realized_pnl'])} · unrealized {money(account['unrealized_pnl'])} · "
-        f"since inception {money(end - D(account['starting_equity']))}",
-        f"Entries filled {filled} · expired {entries.get('EXPIRED', 0)} · canceled {entries.get('CANCELED', 0)}",
-        "Exits " + (", ".join(f"{k.lower()} {v}" for k, v in sorted(exits.items())) or "none")
-        + f" · fees {money(fees)} · largest loss {money(worst)}",
-        f"Open positions {len(account['positions'])}",
+        f"{filled} trades entered · {money(fees)} in fees · {len(account['positions'])} positions still open",
+        f"Cash available **{money(account['available_cash'])}**",
     ]
     if account.get("provisional"):
-        lines.append("Some marks are stale or incomplete — this report is provisional.")
+        lines.append("⏳ Some prices are delayed. The account value may change.")
     if data_quality:
         lines.append(data_quality)
     return {"publication_id": f"report:{cfg.strategy_id}:{season}:{week:02d}", "kind": "weekly_report",
             "channel": "reports", "revision": 1,
-            "payload": {"title": f"NFL paper account · {season} week {week}", "description": "\n".join(lines),
-                        "footer": f"PAPER TRADING · config {cfg.version}"}}
+            "payload": {"title": f"📋 Kirkey’s weekly wrap · Week {week}, {season}", "description": "\n".join(lines),
+                        "footer": "Beef Kirkey · NFL paper trading"}}
 
 
 def performance(engine, snapshots: list[dict]) -> dict:

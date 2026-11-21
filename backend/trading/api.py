@@ -11,7 +11,7 @@ import hmac
 import json
 import os
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from .common import utc
@@ -51,6 +51,12 @@ def operator(token: str | None):
     expected = operator_token()
     if not expected or not token or not hmac.compare_digest(expected, token):
         raise HTTPException(403, "Operator token required")
+
+
+@router.get("/parlay")
+def parlay():
+    card = store().latest_parlay()
+    return {"card": card, "message": None if card else "A weekly parlay is not available yet."}
 
 
 @router.get("/account")
@@ -171,9 +177,10 @@ def review(body: OperatorAction, x_paper_operator_token: str | None = Header(Non
 
 
 @router.get("/outbox/pending")
-def outbox(x_paper_operator_token: str | None = Header(None)):
+def outbox(x_paper_operator_token: str | None = Header(None), channels: list[str] | None = Query(None),
+           include_current_parlay: bool = False):
     operator(x_paper_operator_token)
-    return {"publications": store().pending_publications()}
+    return {"publications": store().pending_publications(channels=channels, include_current_parlay=include_current_parlay)}
 
 
 class Ack(BaseModel):

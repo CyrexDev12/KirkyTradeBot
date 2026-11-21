@@ -166,11 +166,32 @@ class Store:
             for item in items:
                 self._enqueue(db, item, now)
 
-    def pending_publications(self, limit=20) -> list[dict]:
+    def pending_publications(self, limit=20, channels=None, include_current_parlay=False) -> list[dict]:
+        query = ("SELECT * FROM discord_outbox WHERE status='pending' AND "
+                 "(kind!='weekly_parlay' OR julianday(json_extract(payload,'$.expires_at')) > julianday('now')) ")
+        args = []
+        if channels is not None:
+            if not channels:
+                return []
+            query += "AND channel IN (" + ",".join("?" for _ in channels) + ") "
+            args.extend(channels)
         with closing(self.connect()) as db:
-            rows = db.execute("SELECT * FROM discord_outbox WHERE status='pending' ORDER BY created_at, rowid "
-                              "LIMIT ?", (limit,)).fetchall()
+            rows = db.execute(query + "ORDER BY created_at, rowid LIMIT ?", [*args, limit]).fetchall()
+            if include_current_parlay and channels and "parlay" in channels:
+                # Delivery is acknowledged globally, but servers may opt in or
+                # move channels afterward. Expose the active card for local reconciliation.
+                current = db.execute("""SELECT * FROM discord_outbox
+                    WHERE publication_id=(SELECT max(publication_id) FROM discord_outbox WHERE kind='weekly_parlay')
+                    AND status='delivered' AND julianday(json_extract(payload,'$.expires_at')) > julianday('now')""").fetchone()
+                if current:
+                    rows.append(current)
         return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
+
+    def latest_parlay(self) -> dict | None:
+        with closing(self.connect()) as db:
+            row = db.execute("SELECT payload FROM discord_outbox WHERE kind='weekly_parlay' "
+                             "ORDER BY publication_id DESC LIMIT 1").fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def ack_publication(self, publication_id: str, revision: int, message_id: str | None, error: str | None, now):
         with self.tx() as db:

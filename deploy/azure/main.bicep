@@ -4,10 +4,10 @@ param sshPublicKey string
 @description('Your administrator public IP as a CIDR, for example 203.0.113.10/32.')
 param adminCidr string
 
-param location string = 'canadacentral'
+param location string = 'mexicocentral'
 param vmName string = 'nfl-fair-value'
 param adminUsername string = 'azureuser'
-param vmSize string = 'Standard_B2as_v2'
+param vmSize string = 'Standard_B2s_v2'
 
 resource networkSecurity 'Microsoft.Network/networkSecurityGroups@2024-05-01' = {
   name: '${vmName}-nsg'

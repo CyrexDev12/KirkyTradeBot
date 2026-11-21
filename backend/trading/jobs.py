@@ -7,6 +7,8 @@ handled the same way. Job keys make every step idempotent across restarts.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -53,8 +55,9 @@ def tuesday_fallback(games: list[dict], cfg: StrategyConfig) -> datetime:
 
 
 class WeeklyJobs:
-    def __init__(self, store: Store, cfg: StrategyConfig, planner: WeeklyPlanner, inputs, fees=None):
+    def __init__(self, store: Store, cfg: StrategyConfig, planner: WeeklyPlanner, inputs, fees=None, parlay=None):
         self.store, self.cfg, self.planner, self.inputs, self.fees = store, cfg, planner, inputs, fees
+        self.parlay = parlay
 
     def _done(self, key: str) -> bool:
         job = self.store.job(key)
@@ -92,6 +95,11 @@ class WeeklyJobs:
         actions = []
         self.ensure_account(now)
         rows = self.inputs.all_games()
+        if self.parlay is not None:
+            try:
+                await asyncio.to_thread(self.parlay.tick, rows, now)
+            except Exception:
+                logging.getLogger(__name__).exception("Weekly parlay unavailable; will retry")
         prev, nxt = previous_and_next(rows, now)
         if prev is None:
             return actions
@@ -117,6 +125,7 @@ class WeeklyJobs:
         plan_job = f"plan:{key}"
         if self._done(plan_job):
             return actions
+        waiting_for = "the final scores from last week" if not final else "last week’s results to finish processing"
         if final and self._done(report_key):
             ready, why = self.inputs.ready_for(n_season, n_week, now)
             if ready:
@@ -126,15 +135,15 @@ class WeeklyJobs:
                 actions.append(plan_job)
                 return actions
             self.store.set_job(plan_job, "weekly_plan", "waiting_data", now, {"reason": why})
+            waiting_for = "this week’s schedule" if why == "no scheduled games" else "fresh predictions for this week"
         fallback = tuesday_fallback(games, self.cfg)
         delayed_key = f"delayed:{key}"
         if now >= fallback and not self._done(delayed_key):
-            reason = "previous slate not final yet" if not final else \
-                (self.store.job(plan_job) or {}).get("detail") or "upstream NFL data not ready"
             self.store.enqueue([{"publication_id": delayed_key, "kind": "status", "channel": "picks", "revision": 1,
-                                 "payload": {"title": f"NFL paper plan delayed · {n_season} week {n_week}",
-                                             "description": f"Planning is waiting: {reason}. Will retry automatically.",
-                                             "footer": "PAPER TRADING"}}], now)
+                                 "payload": {"title": f"⏳ Picks on hold · Week {n_week}, {n_season}",
+                                             "description": f"Kirkey’s waiting for {waiting_for}. "
+                                                            "The picks will post here when the scan finishes.",
+                                             "footer": "Beef Kirkey · NFL paper trading"}}], now)
             self.store.set_job(delayed_key, "delayed_status", "done", now)
             actions.append(delayed_key)
         return actions
