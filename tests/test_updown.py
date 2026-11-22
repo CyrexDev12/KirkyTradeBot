@@ -12,7 +12,7 @@ from backend.updown.feed import (closing_minute_average, event_slug, parse_book,
                                  settlement_price, window_start)
 from backend.updown.model import fair_up, sigma_per_second, taker_fee
 from backend.updown.store import Store
-from backend.updown.strategy import Book, Settings, Window, early_exit, evaluate
+from backend.updown.strategy import Book, Product, Settings, Window, crypto_products, early_exit, evaluate
 from backend.updown.worker import Worker
 from bot.updown import updown_account_card, updown_stats_card, updown_trade_card
 
@@ -169,27 +169,28 @@ class FakeFeed:
         self.settled = None
         self.calls = []
 
-    async def window(self, asset, start):
-        return Window(asset, f"m-{asset}-{start}", start, start + 900, 100.0, "MARKET_STATUS_OPEN", 0.095)
+    async def window(self, product, start):
+        return Window(product.symbol, f"m-{product.key}-{start}", start, start + product.seconds, 100.0,
+                      "MARKET_STATUS_OPEN", 0.095, product.horizon, product.rule)
 
-    async def settlement(self, asset, start):
+    async def settlement(self, product, start):
         return ("MARKET_STATUS_RESOLVED", self.settled) if self.settled else ("MARKET_STATUS_OPEN", None)
 
     async def book(self, slug):
         return Book(((0.45, 400),), ((0.47, 400),), self.clock())
 
-    async def seconds(self, assets, lookback=120):
+    async def seconds(self, ids, lookback=120):
         now = int(self.clock())
-        return {a: [(t, 100.03) for t in range(now - 60, now)] for a in assets}
+        return {i.split(":")[1]: [(t, 100.03) for t in range(now - 60, now)] for i in ids}
 
-    async def minutes(self, assets, lookback=7200):
+    async def minutes(self, ids, lookback=7200):
         rng = random.Random(2)
         closes = [100.0]
         for _ in range(120):
             closes.append(closes[-1] * math.exp(rng.gauss(0, SIGMA * math.sqrt(60))))
-        return {a: list(enumerate(closes)) for a in assets}
+        return {i.split(":")[1]: list(enumerate(closes)) for i in ids}
 
-    async def coinbase(self, asset):
+    async def coinbase(self, product_id):
         return 100.03
 
 
@@ -197,14 +198,14 @@ def test_worker_enters_once_per_window_journals_and_settles(tmp_path):
     now = [START + 30.0]
     store = Store(tmp_path / "u.sqlite3")
     fake = FakeFeed(lambda: now[0])
-    worker = Worker(store, fake, Settings(assets=("btc", "eth")), clock=lambda: now[0])
+    worker = Worker(store, fake, Settings(products=crypto_products(("btc", "eth"))), clock=lambda: now[0])
     asyncio.run(worker.tick())
     assert store.open_trades() == []  # too early in the window
     now[0] = START + 300
     asyncio.run(worker.tick())
     asyncio.run(worker.tick())
     opened = store.open_trades()
-    assert sorted(t["asset"] for t in opened) == ["btc", "eth"]
+    assert sorted(t["key"] for t in opened) == ["btc-15m", "eth-15m"]
     assert all(t["cost"] <= 5 and t["coinbase_price"] == 100.03 for t in opened)
     now[0] = END + 20
     fake.settled = 100.5
@@ -219,11 +220,11 @@ def test_cards_state_the_risk(tmp_path):
     t = store.open(window(), decide(), START + 300, {"index_price": 100.03, "coinbase_price": 100.02, "seconds_left": 600})
     card = updown_trade_card(t)
     risk = dict(card["fields"])["⚠️ Risk"]
-    assert "most you can lose" in risk and "5% max per bet" in risk and "10% daily loss" in risk
+    assert "PICK" in card["title"] and "most you can lose" in risk and "5% max per bet" in risk and "10% daily loss" in risk
     closed = updown_trade_card(store.settle(t["id"], 101, END + 5))
-    assert "closed" in closed["title"] and "settled **UP**" in closed["description"]
+    assert "WIN" in closed["title"] and "settled **UP**" in closed["description"]
     acct = store.account(END + 10)
-    acct["risk_settings"] = {"assets": ["btc"], "min_edge": 0.02, "price_range": [0.1, 0.9], "kelly_fraction": 0.25,
+    acct["risk_settings"] = {"markets": ["btc-15m"], "min_edge": 0.02, "price_range": [0.1, 0.9], "kelly_fraction": 0.25,
                              "max_stake_pct": 0.05, "max_open_stake_pct": 0.15, "daily_loss_limit": 0.1}
     assert "daily stop 10%" in dict(updown_account_card(acct)["fields"])["⚠️ Risk settings"]
     assert updown_stats_card(store.stats())["title"]

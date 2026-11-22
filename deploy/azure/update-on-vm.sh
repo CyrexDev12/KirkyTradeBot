@@ -151,7 +151,7 @@ for item in "${managed[@]}"; do
 done
 
 # Recreate to remount secret files and refresh command registration. Keep volumes.
-"${compose[@]}" up -d --no-build --force-recreate --wait --wait-timeout 900 backend bot crypto-worker updown-worker
+"${compose[@]}" up -d --no-build --force-recreate --wait --wait-timeout 900 backend bot crypto-worker updown-worker gold-worker
 
 # Prepare profiles before the first worker plan can freeze an uncalibrated slate.
 if ! "${compose[@]}" exec -T backend test -s /data/trading/uncertainty_profiles.json; then

@@ -1,8 +1,11 @@
 """Entry, early exit and sizing rules for Up/Down paper bets.
 
-Settings come from environment variables (defaults in brackets):
+The same engine runs two desks: crypto 15-minute windows (prefix ``UPDOWN_``)
+and gold 5-minute/15-minute/hourly windows (prefix ``GOLD_``, see
+``backend/gold``). Settings come from environment variables (crypto defaults in
+brackets; gold uses the same names with ``GOLD_``):
 
-* ``UPDOWN_ASSETS`` [btc,eth,sol]
+* ``UPDOWN_ASSETS`` [btc,eth,sol] / ``GOLD_HORIZONS`` [5m,15m,1h]
 * ``UPDOWN_MIN_EDGE`` [0.02] — fair value minus price minus fee, per $1 contract
 * ``UPDOWN_PRICE_RANGE`` [0.10-0.90] — skip contracts priced outside this range
 * ``UPDOWN_KELLY_FRACTION`` [0.25] — share of the Kelly stake to use
@@ -18,12 +21,44 @@ from dataclasses import dataclass, field
 import math
 import os
 
-from .model import fair_up, taker_fee
+from .model import fair_value, taker_fee
+
+HORIZON_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
+
+
+@dataclass(frozen=True)
+class Product:
+    """One Polymarket Up/Down series, e.g. btc 15m (60-second average) or gold 1h (point price)."""
+    symbol: str
+    asset_class: str = "crypto"  # history id prefix: crypto:btc, commodity:gold
+    horizon: str = "15m"
+    rule: str = "avg60"  # "avg60" (CF Benchmarks crypto) | "point" (Chainlink gold)
+    coinbase: str | None = None  # cross-check product, e.g. BTC-USD or PAXG-USD
+
+    @property
+    def seconds(self) -> int:
+        return HORIZON_SECONDS[self.horizon]
+
+    @property
+    def key(self) -> str:
+        return f"{self.symbol}-{self.horizon}"
+
+    @property
+    def index_id(self) -> str:
+        return f"{self.asset_class}:{self.symbol}"
+
+
+def crypto_products(assets) -> tuple:
+    return tuple(Product(a, "crypto", "15m", "avg60", f"{a.upper()}-USD") for a in assets)
+
+
+def gold_products(horizons) -> tuple:
+    return tuple(Product("gold", "commodity", h, "point", "PAXG-USD") for h in horizons)
 
 
 @dataclass(frozen=True)
 class Settings:
-    assets: tuple = ("btc", "eth", "sol")
+    products: tuple = crypto_products(("btc", "eth", "sol"))
     min_edge: float = 0.02
     price_min: float = 0.10
     price_max: float = 0.90
@@ -37,21 +72,37 @@ class Settings:
     coinbase_max_gap: float = 0.002
     participation: float = 0.5
     default_theta: float = 0.095
+    max_index_age: float = 10.0  # seconds; older settlement-index prices are treated as stale
+
+    @property
+    def assets(self) -> tuple:
+        return tuple(dict.fromkeys(p.symbol for p in self.products))
 
     @classmethod
-    def from_env(cls, env=None) -> "Settings":
+    def from_env(cls, env=None, prefix="UPDOWN") -> "Settings":
         env = os.environ if env is None else env
-        lo, hi = (float(x) for x in env.get("UPDOWN_PRICE_RANGE", "0.10-0.90").split("-", 1))
-        s = cls(assets=tuple(a.strip().lower() for a in env.get("UPDOWN_ASSETS", "btc,eth,sol").split(",") if a.strip()),
-                min_edge=float(env.get("UPDOWN_MIN_EDGE", 0.02)), price_min=lo, price_max=hi,
-                kelly_fraction=float(env.get("UPDOWN_KELLY_FRACTION", 0.25)),
-                max_stake=float(env.get("UPDOWN_MAX_STAKE", 0.05)),
-                max_open_stake=float(env.get("UPDOWN_MAX_OPEN_STAKE", 0.15)),
-                daily_loss_limit=float(env.get("UPDOWN_DAILY_LOSS_LIMIT", 0.10)),
-                take_profit_edge=float(env.get("UPDOWN_TAKE_PROFIT_EDGE", 0.01)),
-                coinbase_max_gap=float(env.get("UPDOWN_COINBASE_MAX_GAP", 0.002)))
+        gold = prefix == "GOLD"
+
+        def get(name, default):
+            return env.get(f"{prefix}_{name}", default)
+
+        lo, hi = (float(x) for x in get("PRICE_RANGE", "0.10-0.90").split("-", 1))
+        if gold:
+            products = gold_products(h.strip() for h in get("HORIZONS", "5m,15m,1h").split(",") if h.strip())
+        else:
+            products = crypto_products(a.strip().lower() for a in get("ASSETS", "btc,eth,sol").split(",") if a.strip())
+        s = cls(products=products, min_edge=float(get("MIN_EDGE", 0.02)), price_min=lo, price_max=hi,
+                kelly_fraction=float(get("KELLY_FRACTION", 0.25)), max_stake=float(get("MAX_STAKE", 0.05)),
+                max_open_stake=float(get("MAX_OPEN_STAKE", 0.15)),
+                daily_loss_limit=float(get("DAILY_LOSS_LIMIT", 0.10)),
+                take_profit_edge=float(get("TAKE_PROFIT_EDGE", 0.01)),
+                # PAXG (tokenized gold) trades at a small premium to spot, so gold allows a wider gap.
+                coinbase_max_gap=float(get("COINBASE_MAX_GAP", 0.01 if gold else 0.002)),
+                max_index_age=float(get("MAX_INDEX_AGE", 30 if gold else 10)))
         if not (0 < s.price_min < s.price_max < 1 and 0 < s.max_stake <= s.max_open_stake <= 1):
             raise ValueError("Invalid Up/Down settings")
+        if any(p.horizon not in HORIZON_SECONDS for p in s.products):
+            raise ValueError("Up/Down horizons must be 5m, 15m or 1h")
         return s
 
 
@@ -67,6 +118,12 @@ class Window:
     price_to_beat: float | None
     status: str
     theta: float
+    horizon: str = "15m"
+    rule: str = "avg60"
+
+    @property
+    def key(self) -> str:
+        return f"{self.asset}-{self.horizon}"
 
 
 @dataclass(frozen=True)
@@ -113,7 +170,7 @@ def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: 
         return Decision("SKIP", f"market not open ({window.status})")
     if window.price_to_beat is None:
         return Decision("SKIP", "price to beat not published yet")
-    p_up = fair_up(window.price_to_beat, index_price, window.end - now, sigma, closing_avg)
+    p_up = fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, closing_avg)
     if not window.start + s.entry_after_seconds <= now <= window.end - s.entry_before_end_seconds:
         return Decision("SKIP", "outside the entry part of the window", fair_up=p_up)
     if today_pnl <= -s.daily_loss_limit * (balance - today_pnl):

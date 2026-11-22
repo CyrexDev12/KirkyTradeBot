@@ -1,4 +1,8 @@
-"""SQLite journal for the Up/Down paper account (separate from the BTC spot bot)."""
+"""SQLite journal for an Up/Down paper account (crypto and gold each keep their own file).
+
+Rows are keyed by market key (``btc-15m``, ``gold-1h``) and window start, so the
+gold 15-minute and hourly windows that start at the same time stay separate.
+"""
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
@@ -93,7 +97,7 @@ class Store:
                         values.get("coinbase"), values.get("fair_up"), values.get("yes_bid"), values.get("yes_ask")))
 
     def record_outcome(self, asset, start, price_to_beat, settlement):
-        outcome = "UP" if settlement >= price_to_beat else "DOWN"
+        outcome = "UNKNOWN" if settlement is None else ("UP" if settlement >= price_to_beat else "DOWN")
         with self.transaction(True) as db:
             db.execute("""INSERT INTO windows(asset,window_start,price_to_beat,settlement,outcome) VALUES(?,?,?,?,?)
                           ON CONFLICT(asset,window_start) DO UPDATE SET settlement=excluded.settlement,
@@ -104,7 +108,7 @@ class Store:
     def unresolved_windows(self, before: int) -> list[tuple[str, int, float | None]]:
         with self.transaction() as db:
             return [(r[0], r[1], r[2]) for r in db.execute(
-                "SELECT asset,window_start,price_to_beat FROM windows WHERE outcome IS NULL AND window_start+900<=?"
+                "SELECT asset,window_start,price_to_beat FROM windows WHERE outcome IS NULL AND window_start+300<=?"
                 " ORDER BY window_start LIMIT 20", (before,))]
 
     # ---- trades ---------------------------------------------------------
@@ -123,7 +127,8 @@ class Store:
                     db.execute("SELECT id,payload FROM trades WHERE status='OPEN' ORDER BY id")]
 
     def open(self, window, decision, now, extra=None) -> dict | None:
-        trade = {"mode": "PAPER_ONLY", "status": "OPEN", "asset": window.asset, "market_slug": window.slug,
+        trade = {"mode": "PAPER_ONLY", "status": "OPEN", "asset": window.asset, "key": window.key,
+                 "horizon": window.horizon, "market_slug": window.slug,
                  "window_start": iso(window.start), "window_end": iso(window.end), "window_start_ts": window.start,
                  "window_end_ts": window.end, "price_to_beat": window.price_to_beat, "theta": window.theta,
                  "side": decision.side, "quantity": decision.quantity, "remaining": decision.quantity,
@@ -133,12 +138,12 @@ class Store:
                  **decision.risk, **(extra or {})}
         with self.transaction(True) as db:
             # Re-check limits inside the write lock so two ticks cannot overspend.
-            if db.execute("SELECT 1 FROM trades WHERE asset=? AND window_start=?", (window.asset, window.start)).fetchone():
+            if db.execute("SELECT 1 FROM trades WHERE asset=? AND window_start=?", (window.key, window.start)).fetchone():
                 return None
             balance = self._realized(db)
             trade["balance_at_entry"] = round(balance, 6)
             cur = db.execute("INSERT INTO trades(asset,window_start,status,cost,payload) VALUES(?,?,?,?,?)",
-                             (window.asset, window.start, "OPEN", trade["cost"], json.dumps(trade, allow_nan=False)))
+                             (window.key, window.start, "OPEN", trade["cost"], json.dumps(trade, allow_nan=False)))
             trade["id"] = cur.lastrowid
             self._event(db, "opened", trade, now)
         return trade
@@ -228,13 +233,14 @@ class Store:
             closed = [json.loads(r[0]) for r in db.execute("SELECT payload FROM trades WHERE status='CLOSED'")]
             obs = db.execute("""SELECT o.fair_up, w.outcome, o.yes_ask, o.yes_bid FROM observations o JOIN windows w
                                 ON w.asset=o.asset AND w.window_start=o.window_start
-                                WHERE w.outcome IS NOT NULL AND o.fair_up IS NOT NULL""").fetchall()
-            windows = db.execute("SELECT count(*) FROM windows WHERE outcome IS NOT NULL").fetchone()[0]
+                                WHERE w.outcome IN ('UP','DOWN') AND o.fair_up IS NOT NULL""").fetchall()
+            windows = db.execute("SELECT count(*) FROM windows WHERE outcome IN ('UP','DOWN')").fetchone()[0]
         pnl = [t["net_pnl"] for t in closed]
         staked = sum(t["cost"] for t in closed)
         by_asset = {}
         for t in closed:
-            a = by_asset.setdefault(t["asset"], {"trades": 0, "net_pnl": 0.0})
+            a = by_asset.setdefault(t.get("key", t["asset"]), {"trades": 0, "wins": 0, "net_pnl": 0.0})
+            a["wins"] += t["net_pnl"] > 0
             a["trades"] += 1
             a["net_pnl"] = round(a["net_pnl"] + t["net_pnl"], 6)
 

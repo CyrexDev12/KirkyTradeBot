@@ -58,6 +58,27 @@ def fair_up(price_to_beat: float, now_price: float, seconds_left: float, sigma: 
     return phi(math.log(now_price / needed) / sd)
 
 
+def fair_up_point(price_to_beat: float, now_price: float, seconds_left: float, sigma: float) -> float:
+    """Probability of Up when settlement is a single price at the window end
+    (Polymarket gold: Chainlink XAU/USD at the end second vs the start second).
+    ln(close / now) ~ N(0, sigma^2 * tau). Checked on gold 1-minute history
+    2026-11-16..20: Brier 0.16 halfway through 15m and 1h windows (coin flip 0.25)."""
+    if price_to_beat <= 0 or now_price <= 0 or sigma <= 0:
+        raise ValueError("prices and sigma must be positive")
+    tau = max(0.0, float(seconds_left))
+    if tau == 0:
+        return 1.0 if now_price >= price_to_beat else 0.0
+    return phi(math.log(now_price / price_to_beat) / (sigma * math.sqrt(tau)))
+
+
+def fair_value(rule: str, price_to_beat, now_price, seconds_left, sigma, closing_minute_avg=None) -> float:
+    if rule == "point":
+        return fair_up_point(price_to_beat, now_price, seconds_left, sigma)
+    if rule == "avg60":
+        return fair_up(price_to_beat, now_price, seconds_left, sigma, closing_minute_avg)
+    raise ValueError(f"unknown settlement rule {rule!r}")
+
+
 def taker_fee(price: float, theta: float) -> float:
     """Polymarket US taker fee per contract: theta * p * (1 - p)."""
     return theta * price * (1 - price)

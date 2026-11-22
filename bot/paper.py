@@ -22,9 +22,10 @@ from discord import app_commands
 from .messages import timestamp
 
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports", "parlay", "crypto")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold")
 MARKER = "pub "
-ROUTE_NAMES = {"crypto": "₿ BTC paper trades", "parlay": "🏈 Weekly NFL parlays",
+ROUTE_NAMES = {"crypto": "₿ BTC + crypto Up/Down paper trades", "gold": "🥇 Gold Up/Down paper picks",
+               "parlay": "🏈 Weekly NFL parlays",
                "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
 
@@ -48,6 +49,7 @@ class PaperPosts:
                     PRIMARY KEY (guild_id, publication_id));
                 CREATE TABLE IF NOT EXISTS crypto_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS updown_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS gold_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
             """)
 
     def connect(self):
@@ -70,7 +72,7 @@ class PaperPosts:
 
     def configured_nfl_routes(self):
         with closing(self.connect()) as db:
-            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind != 'crypto'")]
+            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind NOT IN ('crypto','gold')")]
 
     def configure_crypto(self, guild_id, channel_id, latest_event_id, *, parlay_channel_id=None):
         with closing(self.connect()) as db, db:
@@ -86,17 +88,30 @@ class PaperPosts:
                 "SELECT guild_id, channel_id, event_id FROM paper_channels JOIN crypto_cursors USING (guild_id) "
                 "WHERE kind='crypto'")]
 
-    def updown_routes(self):
-        """Up/Down cards share the crypto channel; cursor is None until first seen."""
+    CURSOR_TABLES = ("updown_cursors", "gold_cursors")
+
+    def desk_routes(self, kind, table):
+        """Routes for an Up/Down desk (crypto cards share the crypto channel, gold has its own).
+        The cursor is None until the publisher first sees the route, so a new channel starts fresh."""
+        if table not in self.CURSOR_TABLES:
+            raise ValueError(table)
         with closing(self.connect()) as db:
             return [dict(r) for r in db.execute(
-                "SELECT c.guild_id, c.channel_id, u.event_id FROM paper_channels c "
-                "LEFT JOIN updown_cursors u USING (guild_id) WHERE c.kind='crypto'")]
+                f"SELECT c.guild_id, c.channel_id, u.event_id FROM paper_channels c "
+                f"LEFT JOIN {table} u USING (guild_id) WHERE c.kind=?", (kind,))]
+
+    def advance_desk(self, table, guild_id, event_id):
+        if table not in self.CURSOR_TABLES:
+            raise ValueError(table)
+        with closing(self.connect()) as db, db:
+            db.execute(f"INSERT INTO {table} VALUES (?,?) ON CONFLICT(guild_id) "
+                       "DO UPDATE SET event_id=max(event_id, excluded.event_id)", (guild_id, event_id))
+
+    def updown_routes(self):
+        return self.desk_routes("crypto", "updown_cursors")
 
     def advance_updown(self, guild_id, event_id):
-        with closing(self.connect()) as db, db:
-            db.execute("INSERT INTO updown_cursors VALUES (?,?) ON CONFLICT(guild_id) "
-                       "DO UPDATE SET event_id=max(event_id, excluded.event_id)", (guild_id, event_id))
+        self.advance_desk("updown_cursors", guild_id, event_id)
 
     def advance_crypto(self, guild_id, event_id):
         with closing(self.connect()) as db, db:
@@ -417,7 +432,7 @@ def register_paper_commands(bot, posts: PaperPosts):
                  for kind, name in ROUTE_NAMES.items()]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @group.command(name="set", description="Choose a channel for NFL picks, updates, reports, the weekly parlay, or BTC paper trades")
+    @group.command(name="set", description="Choose a channel for NFL picks, updates, reports, the weekly parlay, BTC or gold paper trades")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.choices(kind=[app_commands.Choice(name=k, value=k) for k in KINDS])
     async def set_channel(interaction: discord.Interaction, kind: app_commands.Choice[str], channel: discord.TextChannel):
@@ -432,6 +447,11 @@ def register_paper_commands(bot, posts: PaperPosts):
             await reply(interaction, f"₿ BTC paper entries, exits and skips will post in {channel.mention}.")
             return
         posts.set_channel(interaction.guild_id, kind.value, channel.id)
+        if kind.value == "gold":
+            await interaction.response.send_message(
+                f"🥇 Gold picks, wins, losses and outs will post in {channel.mention}. "
+                "See open picks with /gold-picks and results with /gold-results.", ephemeral=True)
+            return
         if kind.value == "parlay":
             await interaction.response.send_message(f"🏈 Weekly parlay boards will post in {channel.mention}. "
                                                     "See the latest with /parlay.", ephemeral=True)

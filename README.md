@@ -18,6 +18,8 @@ The BTC account starts at $100. Position sizing reduces the amount as trend qual
 
 The separate **Polymarket Up/Down** paper bot (`backend/updown`, see [docs/UPDOWN.md](docs/UPDOWN.md)) prices BTC, ETH and SOL 15-minute Up/Down contracts from the settlement index with Coinbase as a cross-check, and posts its entries and settlements to the same crypto channel. Use `/updown-account`, `/updown-trades` and `/updown-stats`.
 
+The **gold** paper desk ([docs/GOLD.md](docs/GOLD.md)) runs the same engine on Polymarket's Gold Up or Down 15-minute and hourly markets (5-minute too once listed), with Coinbase PAXG-USD as the cross-check. Pick a channel with `/paper-channels set gold`; it posts every pick and its win, loss or early out. Use `/gold-picks`, `/gold-results`, `/gold-stats` and `/gold-account`.
+
 `/crypto-stats` shows lifetime wins, losses, break-evens, and profit after costs. Win rate divides profitable trades by all closed trades. Skips and open positions are counted separately. To adjust its next position, the worker looks at up to 40 recent trades in the same direction and Arizona hour over 90 days. With at least 20 usable outcomes, under 40% wins, and losses on average per dollar at risk in both halves of the sample, it halves the usual size. It can return to its usual size as evidence changes. Delayed exits more than a minute past the window count toward lifetime results only.
 
 Requires Python 3.11 or newer. From this directory:
