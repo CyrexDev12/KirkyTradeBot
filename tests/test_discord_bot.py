@@ -185,7 +185,8 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
         commands = {c.name:c for c in bot.tree.get_commands()}
         assert set(commands) == {"weeklymatchup","matchup","nextgame","botstatus","help","alerts",
                                  "picks","trade","account","performance","why-no-trades","health",
-                                 "paper-pause","paper-resume","paper-channels","parlay","crypto-account","crypto-trades","crypto-stats"}
+                                 "paper-pause","paper-resume","paper-channels","parlay","crypto-account","crypto-trades","crypto-stats",
+                                 "updown-account","updown-trades","updown-stats"}
         assert bot.intents.value == 1
         for command in commands.values():
             command.to_dict(bot.tree)

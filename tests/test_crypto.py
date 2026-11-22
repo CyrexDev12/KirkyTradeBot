@@ -10,7 +10,17 @@ import pytest
 from backend.crypto import api
 from backend.crypto.market import Bar, DataUnavailable, HISTORY_BARS, Market, Quote, closed_bars
 from backend.crypto.store import Store
-from backend.crypto.strategy import current_slot, paper_entry, trend
+from backend.crypto import strategy
+from backend.crypto.strategy import Settings, current_slot, paper_entry, trend
+
+LEGACY = Settings(hours=(6, 9), window_minutes=30, risk_per_trade=0.005, max_position=0.20,
+                  daily_loss_limit=0.015)
+
+
+@pytest.fixture
+def legacy(monkeypatch):
+    """The original alternate-window 6-9 AM schedule and risk limits."""
+    monkeypatch.setattr(strategy, "SETTINGS", LEGACY)
 from backend.crypto.worker import Worker
 
 UTC = timezone.utc
@@ -77,7 +87,7 @@ def test_coinbase_reads_only_closed_aligned_complete_buckets():
 
 
 @pytest.mark.parametrize("month", [1, 7])
-def test_phoenix_schedule_including_dst_and_excluded_0900(month):
+def test_phoenix_schedule_including_dst_and_excluded_0900(month, legacy):
     first = SLOT.replace(month=month)
     assert current_slot(first - timedelta(seconds=1)) is None
     slots = []
@@ -96,10 +106,12 @@ def test_conservative_signal_risk_budget_and_transaction_costs(side):
     assert s.direction == ("UP" if side == 1 else "DOWN")
     entry, reason = paper_entry(s, quote, 100)
     assert entry is not None, reason
-    assert 0 < entry["risk_at_stop"] <= 0.5
-    assert entry["target_net_profit"] == pytest.approx(1.5 * entry["risk_at_stop"])
+    assert 0 < entry["risk_at_stop"] <= 1.5 and entry["risk_pct"] == pytest.approx(entry["risk_at_stop"] / 100)
+    # "Any profit is profit": the target nets min_profit of the position after both fees and slippage.
+    assert entry["target_net_profit"] == pytest.approx(0.0005 * entry["quantity"] * entry["entry_price"], rel=1e-6)
     assert (entry["entry_price"] - (quote.ask if side == 1 else quote.bid)) * side > 0
-    assert entry["quantity"] * entry["entry_price"] + entry["entry_fee"] <= 20
+    assert entry["quantity"] * entry["entry_price"] + entry["entry_fee"] <= 50
+    assert entry["position_pct"] <= 0.5 and entry["daily_loss_limit"] == 0.05
     smaller, _ = paper_entry(replace(s, confidence=s.confidence / 2), quote, 100)
     assert 0 < smaller["quantity"] < entry["quantity"]
     lowvol = candles(drift=0.00025 * side, width=0.0004)
@@ -146,7 +158,16 @@ def test_lifecycle_is_idempotent_and_separate_from_nfl(tmp_path, side, result):
     assert nfl.read_bytes() == b"Independent NFL ledger"
 
 
-def test_worker_skips_alternating_window_and_recovers_outage_without_backfill(tmp_path):
+def test_every_quarter_hour_is_eligible_all_day_by_default():
+    starts = [SLOT + timedelta(minutes=15 * i) for i in range(8)]
+    assert [current_slot(at) for at in starts] == starts
+    night = SLOT.replace(hour=9)  # 2 AM Arizona
+    assert current_slot(night + timedelta(minutes=7)) == night
+    assert current_slot(night, Settings(hours=(6, 9))) is None
+    assert Settings.from_env({"CRYPTO_TRADING_HOURS": "6-9", "CRYPTO_WINDOW_MINUTES": "30"}).hours == (6, 9)
+
+
+def test_worker_skips_alternating_window_and_recovers_outage_without_backfill(tmp_path, legacy):
     now = SLOT
     store = Store(tmp_path / "paper.sqlite3")
     market = FakeMarket()
@@ -262,7 +283,7 @@ def test_delayed_fill_counts_in_record_but_cannot_train_a_15_minute_pattern(tmp_
     assert stats["patterns"] == []
 
 
-def test_spread_and_daily_loss_limits_survive_restart(tmp_path):
+def test_spread_and_daily_loss_limits_survive_restart(tmp_path, legacy):
     bars, quote = tape()
     signal = trend(bars)
     store = Store(tmp_path / "crypto.sqlite3")
@@ -283,3 +304,12 @@ def test_spread_and_daily_loss_limits_survive_restart(tmp_path):
     tomorrow = SLOT + timedelta(days=1)
     reopened.decide(tomorrow, tomorrow, None, signal, replace(quote, at=tomorrow))
     assert reopened.open_trade()["slot_at"] == tomorrow.isoformat()
+
+
+def test_trade_card_states_the_risk():
+    from bot.crypto import crypto_trade_card
+    bars, quote = tape(direction=1)
+    entry, _ = paper_entry(trend(bars), quote, 100)
+    card = crypto_trade_card({**entry, "status": "OPEN", "slot_at": SLOT.isoformat(), "reason": "x"})
+    risk = dict(card["fields"])["⚠️ Risk"]
+    assert "lost if the stop is hit" in risk and "of balance" in risk and "5% daily loss" in risk

@@ -47,6 +47,7 @@ class PaperPosts:
                     started_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1, error TEXT,
                     PRIMARY KEY (guild_id, publication_id));
                 CREATE TABLE IF NOT EXISTS crypto_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS updown_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
             """)
 
     def connect(self):
@@ -84,6 +85,18 @@ class PaperPosts:
             return [dict(r) for r in db.execute(
                 "SELECT guild_id, channel_id, event_id FROM paper_channels JOIN crypto_cursors USING (guild_id) "
                 "WHERE kind='crypto'")]
+
+    def updown_routes(self):
+        """Up/Down cards share the crypto channel; cursor is None until first seen."""
+        with closing(self.connect()) as db:
+            return [dict(r) for r in db.execute(
+                "SELECT c.guild_id, c.channel_id, u.event_id FROM paper_channels c "
+                "LEFT JOIN updown_cursors u USING (guild_id) WHERE c.kind='crypto'")]
+
+    def advance_updown(self, guild_id, event_id):
+        with closing(self.connect()) as db, db:
+            db.execute("INSERT INTO updown_cursors VALUES (?,?) ON CONFLICT(guild_id) "
+                       "DO UPDATE SET event_id=max(event_id, excluded.event_id)", (guild_id, event_id))
 
     def advance_crypto(self, guild_id, event_id):
         with closing(self.connect()) as db, db:
