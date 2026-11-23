@@ -15,6 +15,7 @@ from discord.ext import tasks
 
 from .api import PredictionAPI
 from .crypto import CryptoPublisher, register_crypto_commands
+from .tracker import ChiefPublisher, register_chief_commands
 from .updown import GOLD, UpdownPublisher, register_gold_commands, register_updown_commands
 from .messages import matchup_embed, timestamp, week_embed
 from .paper import PaperPosts, PaperPublisher, PaperTransport, register_paper_commands
@@ -98,12 +99,14 @@ class NFLBot(discord.Client):
         self.crypto_publisher = CryptoPublisher(api, self.paper_posts, self.paper_publisher)
         self.updown_publisher = UpdownPublisher(api, self.paper_posts, self.paper_publisher)
         self.gold_publisher = UpdownPublisher(api, self.paper_posts, self.paper_publisher, GOLD)
+        self.chief_publisher = ChiefPublisher(api, self.paper_posts, self.paper_publisher)
         self.tree.on_error = report_error
         self.register_commands()
         register_paper_commands(self, self.paper_posts)
         register_crypto_commands(self)
         register_updown_commands(self)
         register_gold_commands(self)
+        register_chief_commands(self)
 
     async def setup_hook(self):
         if self.guild_id:
@@ -148,6 +151,7 @@ class NFLBot(discord.Client):
             await self.crypto_publisher.tick()
             await self.updown_publisher.tick()
             await self.gold_publisher.tick()
+            await self.chief_publisher.tick()
 
     async def show_game(self, interaction, game_id):
         payload = await self.api.forecast(game_id)
@@ -221,6 +225,8 @@ class NFLBot(discord.Client):
                 "🎲 **Polymarket Up/Down desk** · /updown-trades, /updown-stats, /updown-account.\n"
                 "🥇 **Gold desk** · /gold-picks, /gold-results, /gold-stats, /gold-account "
                 "(channel: /paper-channels set gold).\n"
+                "🎖️ **Chief Beef Kirkey** tracks every bot · /chiefkirkey status, trades, bot, alerts "
+                "(channel: /paper-channels set chief).\n"
                 "📣 **Server managers** · /paper-channels setup picks the BTC and parlay channels. "
                 "/paper-channels show lists them. /alerts setup turns on pregame predictions.",
                 ephemeral=True)
