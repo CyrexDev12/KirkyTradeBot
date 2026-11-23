@@ -42,6 +42,7 @@ class Product:
     horizon: str = "15m"
     rule: str = "avg60"  # "avg60" (CF Benchmarks crypto) | "point" (Chainlink gold)
     coinbase: str | None = None  # cross-check product, e.g. BTC-USD or PAXG-USD
+    decimals: int = 2  # settlement price rounding (natural gas uses 4)
 
     @property
     def seconds(self) -> int:
@@ -75,10 +76,18 @@ def gold_products(horizons) -> tuple:
     return tuple(Product("gold", "commodity", h, "point", "PAXG-USD") for h in horizons)
 
 
+FUTURES = {"WTI": ("wti", 2), "NATGAS": ("natgas", 4)}  # env prefix -> (index symbol, price decimals)
+
+
+def futures_products(symbol, horizons, decimals=2) -> tuple:
+    """Energy futures (WTI crude, Henry Hub natural gas): the Chainlink front-month futures mid at
+    the window start/end. Coinbase has no energy markets, so there is no outside cross-check (the
+    desk guards with shock and contract-switch detection instead)."""
+    return tuple(Product(symbol, "commodity", h, "point", None, decimals) for h in horizons)
+
+
 def wti_products(horizons) -> tuple:
-    """WTI crude: Chainlink front-month futures mid at the window start/end. Coinbase has no oil
-    market, so there is no outside cross-check (the desk guards with shock/roll detection instead)."""
-    return tuple(Product("wti", "commodity", h, "point", None) for h in horizons)
+    return futures_products("wti", horizons, 2)
 
 
 @dataclass(frozen=True)
@@ -108,14 +117,16 @@ class Settings:
     @classmethod
     def from_env(cls, env=None, prefix="UPDOWN") -> "Settings":
         env = os.environ if env is None else env
-        gold = prefix in ("GOLD", "WTI")  # point-settled commodity desks share these defaults
+        gold = prefix == "GOLD" or prefix in FUTURES  # point-settled commodity desks share these defaults
 
         def get(name, default):
             return env.get(f"{prefix}_{name}", default)
 
         lo, hi = (float(x) for x in get("PRICE_RANGE", "0.10-0.90").split("-", 1))
-        if prefix == "WTI":
-            products = wti_products(h.strip() for h in get("HORIZONS", "15m,1h,1d").split(",") if h.strip())
+        if prefix in FUTURES:
+            symbol, decimals = FUTURES[prefix]
+            products = futures_products(symbol, (h.strip() for h in get("HORIZONS", "15m,1h,1d").split(",")
+                                                 if h.strip()), decimals)
         elif gold:
             products = gold_products(h.strip() for h in get("HORIZONS", "5m,15m,1h").split(",") if h.strip())
         else:

@@ -47,6 +47,9 @@ class PredictionAPI:
     async def oil(self, path, **params):
         return await self.get("/api/wti" + path, **params)
 
+    async def gas(self, path, **params):
+        return await self.get("/api/natgas" + path, **params)
+
     async def tracker(self, path, **params):
         return await self.get("/api/tracker" + path, **params)
 

@@ -176,7 +176,7 @@ def main(argv=None):
     parser.add_argument("--source", action="append", required=True, metavar="NAME=PATH")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--only", help="comma list: a volume (predictions, bot-state) or folders such as "
-                                       "trading, crypto, updown, gold, wti; 'bot' = the Discord bot's state")
+                                       "trading, crypto, updown, gold, wti, natgas; 'bot' = the Discord bot's state")
     parser.add_argument("--csv", action="store_true", help="also export every SQLite table as CSV")
     parser.add_argument("--owner", help="uid:gid to own the archive (the VM user)")
     args = parser.parse_args(argv)

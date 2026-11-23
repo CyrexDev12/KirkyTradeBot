@@ -108,7 +108,7 @@ def test_chiefkirkey_command_group():
     assert {c.value for c in roster_cmd.parameters[1].choices} == {"all", "open", "closed"}
     trades = group.get_command("trades")
     assert [p.display_name for p in trades.parameters] == ["bot"] and not trades.parameters[0].required
-    assert {c.value for c in group.get_command("bot").parameters[0].choices} == {"nfl", "btc", "updown", "gold", "oil-A", "oil-B", "oil-C", "oil-D", "oil-E"}
+    assert {c.value for c in group.get_command("bot").parameters[0].choices} == {"nfl", "btc", "updown", "gold", "oil-A", "oil-B", "oil-C", "oil-D", "oil-E", "gas-A", "gas-B", "gas-C", "gas-D", "gas-E"}
 
 
 def test_full_roster_cards_and_bracket_results():

@@ -25,6 +25,7 @@ from .updown.api import router as updown_router
 from .gold.api import router as gold_router
 from .tracker.api import router as tracker_router
 from .wti.api import router as wti_router
+from .natgas.api import router as natgas_router
 from .player_api import router as player_router
 from .team_graph import router as team_graph_router
 from .totals import (
@@ -47,6 +48,7 @@ app.include_router(player_router)
 app.include_router(team_graph_router)
 app.include_router(tracker_router)
 app.include_router(wti_router)
+app.include_router(natgas_router)
 logger = logging.getLogger(__name__)
 _refresh_task = None
 _mc_task = None

@@ -125,7 +125,7 @@ for service in backend bot paper-worker; do
         imports='import bot.discord_bot; import bot.paper; import bot.player_stats; from matplotlib.backends.backend_agg import FigureCanvasAgg; from matplotlib.figure import Figure; FigureCanvasAgg(Figure()).draw()'
     elif [[ "$service" == backend ]]; then
         # All three market workers use this same backend image.
-        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.wti.worker'
+        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.wti.worker; import backend.natgas.worker'
     else
         imports='import backend.app; import backend.trading.worker'
     fi
@@ -154,7 +154,7 @@ for item in "${managed[@]}"; do
 done
 
 # Recreate to remount secret files and refresh command registration. Keep volumes.
-"${compose[@]}" up -d --no-build --force-recreate --wait --wait-timeout 900 backend bot crypto-worker updown-worker gold-worker wti-worker
+"${compose[@]}" up -d --no-build --force-recreate --wait --wait-timeout 900 backend bot crypto-worker updown-worker gold-worker wti-worker natgas-worker
 
 # Prepare profiles before the first worker plan can freeze an uncalibrated slate.
 if ! "${compose[@]}" exec -T backend python -c 'from backend.trading.inputs import uncertainty_profiles_current; raise SystemExit(not uncertainty_profiles_current())'; then
@@ -185,6 +185,7 @@ curl -fsS http://127.0.0.1:8000/api/crypto/stats > /dev/null
 curl -fsS http://127.0.0.1:8000/api/updown/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/gold/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/wti/models > /dev/null
+curl -fsS http://127.0.0.1:8000/api/natgas/models > /dev/null
 curl -fsS http://127.0.0.1:8000/api/paper/parlay > /dev/null
 "${compose[@]}" exec -T backend python -c 'import json, urllib.request; paths = json.load(urllib.request.urlopen("http://127.0.0.1:8000/openapi.json", timeout=10))["paths"]; assert {"/api/players/projection", "/api/players/picks", "/api/graphs/team-points"} <= paths.keys()'
 "${compose[@]}" ps

@@ -1,8 +1,9 @@
-"""PAPER_ONLY WTI worker: one shared read-only data feed, five model accounts.
+"""PAPER_ONLY energy desk worker: one shared read-only data feed, five model accounts.
 
-Every 5 seconds it reads the WTI windows, books and settlement prices once, updates the news
+Every 5 seconds it reads the windows, books and settlement prices once, updates the news
 calendar and shock detector, then lets each model's own Worker price, enter, exit and settle
-on that same data. Run: ``python -m backend.wti.worker`` (writes ``data/wti/health.json``).
+on that same data. Run: ``python -m backend.wti.worker`` (crude, ``data/wti``) or
+``python -m backend.natgas.worker`` (natural gas, ``data/natgas``).
 """
 from __future__ import annotations
 
@@ -22,7 +23,8 @@ from ..updown.feed import Feed
 from ..updown.model import sigma_per_second
 from ..updown.store import Store
 from ..updown.worker import ERRORS, Worker
-from . import LEAD_MODEL, MODELS, SETTINGS, Rules, data_directory, model_directory
+from . import Rules
+from .commodity import WTI, Commodity
 from .events import Calendar, Detector, front_month_expiry
 from .models import MODEL_INFO, ModelSet
 
@@ -103,24 +105,28 @@ class InfoLog:
 
 
 class Desk:
-    def __init__(self, feed, settings=SETTINGS, models=MODELS, directory=None, clock=time.time, calendar=None):
-        self.directory = directory or data_directory()
-        self.clock, self.settings = clock, settings
+    def __init__(self, feed, settings=None, models=None, directory=None, clock=time.time, calendar=None,
+                 commodity: Commodity = WTI):
+        self.commodity = commodity
+        self.directory = directory or commodity.directory()
+        self.clock, self.settings = clock, settings or commodity.settings()
+        models = models or commodity.models()
         self.feed = SharedFeed(feed, clock)
-        self.calendar = calendar or Calendar(self.directory / "events.json")
-        self.detector = Detector()
+        self.calendar = calendar or Calendar(self.directory / "events.json", commodity.recurring, commodity.jumps)
+        self.detector = Detector(roll_jump=commodity.roll_jump)
         self.info = InfoLog(self.directory / "info.sqlite3")
-        self.rules = Rules(self.calendar, self.detector)
+        self.rules = Rules.for_commodity(commodity, self.calendar, self.detector)
         self.modelset = ModelSet(self.calendar, self.detector)
         self.workers = {}
         for model_id in models:
             if model_id not in MODEL_INFO:
-                raise ValueError(f"Unknown WTI model {model_id!r}; choose from {', '.join(MODEL_INFO)}")
+                raise ValueError(f"Unknown {commodity.name} model {model_id!r}; choose from {', '.join(MODEL_INFO)}")
             store = Store(self.directory / "models" / model_id / "paper.sqlite3")
             self.workers[model_id] = Worker(store, self.feed, settings, clock=clock,
                                             fair_fn=self.modelset.fair_fn(model_id), gate=self.rules.gate,
                                             pre_exit=self.rules.pre_exit,
-                                            tag={"model": model_id, "model_name": MODEL_INFO[model_id][0]})
+                                            tag={"model": model_id, "model_name": MODEL_INFO[model_id][0],
+                                                 "commodity": commodity.key})
         self.errors = {}
 
     async def watch(self):
@@ -128,8 +134,8 @@ class Desk:
         now = self.clock()
         ids = list(dict.fromkeys(p.index_id for p in self.settings.products))
         try:
-            seconds = (await self.feed.seconds(ids)).get("wti") or []
-            minutes = (await self.feed.minutes(ids)).get("wti") or []
+            seconds = (await self.feed.seconds(ids)).get(self.commodity.key) or []
+            minutes = (await self.feed.minutes(ids)).get(self.commodity.key) or []
             sigma = sigma_per_second([c for _, c in minutes[-121:]]) if len(minutes) > 31 else None
         except ERRORS as exc:
             self.errors["watch"] = f"{type(exc).__name__}: {exc}"[:200]
@@ -147,23 +153,23 @@ class Desk:
             try:
                 await worker.tick()
             except Exception:
-                logger.exception("WTI model %s cycle failed", model_id)
+                logger.exception("%s model %s cycle failed", self.commodity.name, model_id)
                 worker.errors["cycle"] = "unexpected error (see logs)"
 
     def health(self):
         now = self.clock()
         nxt = next((e for e in self.calendar.between(now, now + 7 * 86400) if e.impact != "low"), None)
-        label, expiry = front_month_expiry(datetime.fromtimestamp(now, timezone.utc).date())
+        label, expiry = front_month_expiry(datetime.fromtimestamp(now, timezone.utc).date(), self.commodity.expiry)
         return {"last_heartbeat": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
-                "markets": [p.key for p in self.settings.products], "models": list(self.workers),
-                "lead_model": LEAD_MODEL, "errors": {**self.errors, **{f"{m}:{k}": v for m, w in self.workers.items()
+                "commodity": self.commodity.key, "markets": [p.key for p in self.settings.products],
+                "models": list(self.workers), "lead_model": self.commodity.lead(), "errors": {**self.errors, **{f"{m}:{k}": v for m, w in self.workers.items()
                                                                      for k, v in w.errors.items()}},
                 "next_news": nxt.to_dict() if nxt else None,
                 "front_month": {"contract": label, "last_trading_day": expiry.isoformat()}}
 
 
-async def serve():
-    directory = data_directory()
+async def serve(commodity: Commodity = WTI):
+    directory = commodity.directory()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "health.json"
     stop = asyncio.Event()
@@ -175,12 +181,12 @@ async def serve():
     headers = {"User-Agent": "nfl-fair-value-paper/1"}
     async with httpx.AsyncClient(base_url=BASE, timeout=10, headers=headers) as pm, \
             httpx.AsyncClient(timeout=8, headers=headers) as other:
-        desk = Desk(Feed(ReadOnlyVenueClient(pm, min_interval=0.2), other))
+        desk = Desk(Feed(ReadOnlyVenueClient(pm, min_interval=0.2), other), commodity=commodity)
         while not stop.is_set():
             try:
                 await desk.tick()
             except Exception:
-                logger.exception("WTI desk cycle failed")
+                logger.exception("%s desk cycle failed", commodity.name)
                 desk.errors["cycle"] = "unexpected error (see logs)"
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(desk.health()))

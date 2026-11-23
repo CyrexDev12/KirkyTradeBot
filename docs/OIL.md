@@ -1,4 +1,6 @@
-# 🛢️ WTI crude oil paper desk
+# Energy paper desks: 🛢️ WTI crude and 🔥 natural gas
+
+The two desks run the same engine (`backend/wti`). Natural gas (`backend/natgas`) is covered at the end of this page; everything else here applies to both.
 
 **PAPER_ONLY.** The desk paper-trades Polymarket US **"WTI Crude Up or Down"** markets on the same engine as the gold desk, with every gold feature. Five fair-value models compete live, each with its own $100 paper account, so the best one can be picked from real results.
 
@@ -101,3 +103,41 @@ Times without a timezone are New York time.
   - `/api/wti/info` and `/api/wti/info/events`
   - `/api/wti/{model}/account`, `/trades`, `/stats` and `/events`
 - **Settings:** `WTI_HORIZONS`, `WTI_MODELS`, `WTI_LEAD_MODEL`, the news timings above, and the shared `WTI_MIN_EDGE`, `WTI_MAX_STAKE`, `WTI_TAKE_PROFIT`, `WTI_STOP_LOSS`, …
+
+## 🔥 Natural gas
+
+The gas desk is the same engine with gas settings (`NATGAS_*`). Its journals live in `data/natgas`, and it runs as the `natgas-worker` service.
+
+| | Natural gas |
+|---|---|
+| Markets | `natgas-updown-15m / 1h / 1d-…`. The daily window is the same as WTI: 6:15 PM → 5 PM ET. |
+| Settles on | The Chainlink **front-month Henry Hub futures mid** (`NatGas/USD-Streams-FuturesPrice`), rounded to **4 decimals** |
+| Price feed | `commodity:natgas` |
+| Front month | Last trades three business days before the first day of the delivery month. For example, Dec 2026 last trades Nov 26 and Jan 2027 last trades Dec 29. Exchange holidays aren't modelled. |
+| Contract-switch jump | 1.5% in a minute with no news. Gas regularly moves about 0.7% in a minute, and crude's threshold is 0.8%. |
+
+**Gas news calendar** (New York time; edit `data/natgas/events.json`):
+
+| Release | When | Impact | Move prior |
+|---|---|---|---|
+| EIA Weekly Natural Gas Storage Report | Thu 10:30 AM | high | 0.60% |
+| NOAA 6–10 / 8–14 day weather outlooks | weekdays 3:00 PM | medium | 0.25% |
+| Baker Hughes rig count | Fri 1:00 PM | low | 0.10% |
+| CME natural gas settlement window | weekdays 2:28 PM | low | 0.10% |
+
+**What the history says.** On Nov 18–20, 2026, typical 1-minute moves rose from 11 to 18 basis points in the 10 minutes after the storage report. That's why gas uses bigger move priors than crude. Models A and B scored a Brier score of 0.17 halfway through 15-minute windows and 0.15 for hourly. A coin flip scores 0.25.
+
+**Holiday weeks.** The storage report moves on holiday weeks. Over Thanksgiving it's usually Wednesday. Add the real time to `events.json` and skip the Thursday one:
+
+```json
+{"events": [{"at": "2026-11-25T12:00:00", "name": "EIA Weekly Natural Gas Storage Report", "impact": "high"}],
+ "skip": ["2026-11-26 EIA Weekly Natural Gas Storage Report"]}
+```
+
+**Discord:**
+
+- **Channel.** `/paper-channels set gas` gets the lead model's 🔥 cards, plus storage-report, weather-outlook and ⚡ shock alerts.
+- **Commands.** `/gas leaderboard`, `/gas picks`, `/gas results`, `/gas account`, `/gas stats` and `/gas info`.
+- **Chief Beef Kirkey** tracks `gas-A` … `gas-E`.
+
+**API.** `/api/natgas/models`, `/api/natgas/info` and `/api/natgas/{model}/…`, the same routes as `/api/wti`.

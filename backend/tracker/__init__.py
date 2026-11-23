@@ -9,6 +9,7 @@ record, and a single normalized list of recent trades across all desks:
 * ``updown``  — Polymarket crypto Up/Down 15m (``backend.updown``)
 * ``gold``    — Polymarket gold Up/Down 5m/15m/1h (``backend.gold``)
 * ``oil-A`` … ``oil-E`` — Polymarket WTI crude Up/Down, one desk per competing model (``backend.wti``)
+* ``gas-A`` … ``gas-E`` — Polymarket natural gas Up/Down, one desk per competing model (``backend.natgas``)
 
 States: ``ok`` (healthy), ``warn`` (running but erroring, paused, at its daily loss
 limit or in a deep drawdown), ``down`` (no heartbeat or a stale one).
@@ -24,7 +25,7 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 PHOENIX = ZoneInfo("America/Phoenix")
 CLOSED_STATUSES = ("WIN", "LOSS", "OUT", "TARGET", "STOP", "FLAT")
-STALE_SECONDS = {"nfl": 120, "btc": 180, "updown": 180, "gold": 180, "oil": 180}
+STALE_SECONDS = {"nfl": 120, "btc": 180, "updown": 180, "gold": 180, "oil": 180, "gas": 180}
 DRAWDOWN_WARN = 0.20  # warn when balance is 20% or more below where the desk started
 
 
@@ -212,27 +213,27 @@ def _record(trades):
             "closed": len(done), "recent_pnl": round(sum(t["pnl"] for t in done), 4)}
 
 
-def _wti(model_id):
+def _energy(commodity, model_id):
     def collect_model(now, limit=40):
         from ..updown.api import _store
-        from ..wti import SETTINGS, data_directory
         from ..wti.models import MODEL_INFO
-        directory = data_directory()
-        return _updown_like(f"oil-{model_id}", f"Oil · {model_id} {MODEL_INFO[model_id][0]}", "🛢️",
-                            _store(directory / "models" / model_id / "paper.sqlite3"), directory / "health.json",
-                            SETTINGS, now, limit, error_prefix=f"{model_id}:")
+        directory = commodity.directory()
+        return _updown_like(f"{commodity.tracker}-{model_id}", f"{commodity.short} · {model_id} {MODEL_INFO[model_id][0]}",
+                            commodity.emoji, _store(directory / "models" / model_id / "paper.sqlite3"),
+                            directory / "health.json", commodity.settings(), now, limit, error_prefix=f"{model_id}:")
     return collect_model
 
 
-def _wti_collectors():
-    from ..wti import MODELS
+def _energy_collectors():
+    from ..wti.commodity import NATGAS, WTI
     from ..wti.models import MODEL_INFO
-    return tuple((f"oil-{m}", f"Oil · {m} {MODEL_INFO[m][0]}", "🛢️", _wti(m)) for m in MODELS if m in MODEL_INFO)
+    return tuple((f"{c.tracker}-{m}", f"{c.short} · {m} {MODEL_INFO[m][0]}", c.emoji, _energy(c, m))
+                 for c in (WTI, NATGAS) for m in c.models() if m in MODEL_INFO)
 
 
 COLLECTORS = (("nfl", "NFL Polymarket", "🏈", _nfl), ("btc", "BTC spot (Coinbase)", "₿", _btc),
               ("updown", "Crypto Up/Down 15m", "🎲", _updown), ("gold", "Gold Up/Down", "🥇", _gold),
-              *_wti_collectors())
+              *_energy_collectors())
 
 
 def collect(now: datetime | None = None, collectors=COLLECTORS, limit: int = 40):

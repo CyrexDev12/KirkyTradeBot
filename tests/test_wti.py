@@ -277,8 +277,8 @@ def test_discord_cards_and_publisher(tmp_path):
              "model": "E", "net_pnl": 0.4, "quantity": 5, "entry_price": 0.5, "cost": 2.6, "proceeds": 3.0,
              "window_start": "2026-11-22T23:15:00+00:00", "window_end": "2026-11-23T22:00:00+00:00",
              "price_to_beat": 82.97, "exits": [{"kind": "pre_news", "price": 0.6}]}
-    assert updown_trade_card(trade, OIL)["title"].startswith("📰 OUT BEFORE NEWS · WTI daily")
-    assert updown_trade_card(trade, OIL)["title"].endswith("· model E")
+    assert updown_trade_card(trade, OIL.cards)["title"].startswith("📰 OUT BEFORE NEWS · WTI daily")
+    assert updown_trade_card(trade, OIL.cards)["title"].endswith("· model E")
 
     class API:
         def __init__(self):
@@ -326,7 +326,7 @@ def test_chief_tracks_each_oil_model(tmp_path, monkeypatch):
     from backend.updown import api as updown_api
     updown_api._store.cache_clear()
     ids = [c[0] for c in tracker.COLLECTORS]
-    assert ids[-5:] == ["oil-A", "oil-B", "oil-C", "oil-D", "oil-E"]
+    assert ids[-10:] == ["oil-A", "oil-B", "oil-C", "oil-D", "oil-E", "gas-A", "gas-B", "gas-C", "gas-D", "gas-E"]
     (tmp_path / "wti").mkdir()
     (tmp_path / "wti" / "health.json").write_text(json.dumps({
         "last_heartbeat": datetime.now(timezone.utc).isoformat(), "errors": {"B:wti-15m": "boom", "watch": "x"}}))

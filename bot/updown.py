@@ -25,7 +25,12 @@ logger = logging.getLogger(__name__)
 
 SIDE = {"UP": "📈 Up", "DOWN": "📉 Down"}
 HORIZON = {"5m": "5-min", "15m": "15-min", "1h": "hourly", "1d": "daily"}
-NAMES = {"gold": "Gold", "wti": "WTI"}
+NAMES = {"gold": "Gold", "wti": "WTI", "natgas": "Nat gas"}
+DECIMALS = {"natgas": 4}  # settlement prices: natural gas is quoted to 4 decimals
+
+
+def _price(t, value):
+    return f"${value or 0:,.{DECIMALS.get(t.get('asset'), 2)}f}"
 
 
 @dataclass(frozen=True)
@@ -99,14 +104,14 @@ def result_label(t):
         leg = (t.get("exits") or [{}])[-1]
         return "🛑 STOPPED", f"stop-loss hit · sold at {_cents(leg.get('price', 0))}"
     if t.get("outcome") == t.get("side"):
-        return "✅ WIN", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
-    return "❌ LOSS", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
+        return "✅ WIN", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
+    return "❌ LOSS", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
 
 
 def updown_trade_card(t, desk: Desk = CRYPTO):
     side = SIDE.get(t["side"], t["side"])
     window = (f"{market_name(t)} window {_time(t['window_start'])}–{_time(t['window_end'])} · "
-              f"price to beat {_money(t['price_to_beat'])}")
+              f"price to beat {_price(t, t['price_to_beat'])}")
     if t.get("status") == "CLOSED":
         label, how = result_label(t)
         if t.get("exits") and t["exits"][-1]["kind"] == "settlement" and len(t["exits"]) > 1:
@@ -128,7 +133,7 @@ def updown_trade_card(t, desk: Desk = CRYPTO):
                                     f"{_cents(t['entry_price'])} · edge {t['edge'] * 100:.1f}¢ per contract after fees"),
                 ("⚠️ Risk", risk_text(t)),
                 *([("🎯 Take profit / 🛑 Stop loss", bracket_text(t))] if bracket_text(t) else []),
-                ("Prices used", f"Settlement index {_money(t.get('index_price') or 0)} · {cross} · "
+                ("Prices used", f"Settlement index {_price(t, t.get('index_price'))} · {cross} · "
                                 f"{t.get('seconds_left', 0) / 60:.1f} min left")]}
 
 

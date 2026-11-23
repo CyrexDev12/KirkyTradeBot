@@ -1,13 +1,20 @@
-"""Information the oil desk watches: scheduled releases that move crude, and moves in the
-settlement price that look like news or a contract switch.
+"""Information the energy desks watch: scheduled releases that move the price, and moves in the
+settlement price that look like news or a futures-contract switch.
 
-Scheduled (New York time; edit or extend with ``data/wti/events.json``):
+Scheduled for **WTI crude** (New York time; edit or extend with ``data/wti/events.json``):
 
 * EIA Weekly Petroleum Status Report — Wednesday 10:30 AM (high impact)
 * API weekly crude inventory — Tuesday 4:30 PM (medium)
 * Baker Hughes rig count — Friday 1:00 PM (low)
 * US jobs report — first Friday of the month 8:30 AM (high)
 * CME crude settlement window — weekdays 2:28–2:30 PM (low)
+
+Scheduled for **natural gas** (``data/natgas/events.json``):
+
+* EIA Weekly Natural Gas Storage Report — Thursday 10:30 AM (high)
+* NOAA 6–10 / 8–14 day weather outlooks — daily 3:00 PM (medium)
+* Baker Hughes rig count — Friday 1:00 PM (low)
+* CME natural gas settlement window — weekdays 2:28–2:30 PM (low)
 
 ``events.json`` adds one-offs (OPEC+ meetings, CPI, FOMC, holiday-shifted reports), known
 contract-switch days, and can skip a recurring release on a holiday::
@@ -42,7 +49,7 @@ IMPACT_RANK = {"low": 0, "medium": 1, "high": 2}
 # The event-aware model uses these; the live journal will show whether they need changing.
 JUMP = {"high": 0.0035, "medium": 0.0020, "low": 0.0007}
 
-RECURRING = (
+WTI_RECURRING = (
     # (weekday Mon=0, hour, minute, name, impact, only first week of month)
     (2, 10, 30, "EIA Weekly Petroleum Status Report", "high", False),
     (1, 16, 30, "API weekly crude inventory", "medium", False),
@@ -54,6 +61,17 @@ RECURRING = (
     (3, 14, 28, "CME crude settlement window", "low", False),
     (4, 14, 28, "CME crude settlement window", "low", False),
 )
+RECURRING = WTI_RECURRING
+
+NATGAS_RECURRING = (
+    (3, 10, 30, "EIA Weekly Natural Gas Storage Report", "high", False),
+    *((d, 15, 0, "NOAA 6-10 / 8-14 day weather outlooks", "medium", False) for d in range(5)),
+    (4, 13, 0, "Baker Hughes rig count", "low", False),
+    *((d, 14, 28, "CME natural gas settlement window", "low", False) for d in range(5)),
+)
+# Natural gas moves about twice as much as crude around its releases (Nov 18-20, 2026: typical
+# 1-minute moves rose from 11 to 18 basis points in the 10 minutes after the storage report).
+NATGAS_JUMP = {"high": 0.0060, "medium": 0.0025, "low": 0.0010}
 
 
 @dataclass(frozen=True)
@@ -91,13 +109,24 @@ def cl_last_trade(year: int, month: int) -> date:
     return d
 
 
-def front_month_expiry(today: date) -> tuple[str, date]:
-    """(contract label, last trading day) of the front WTI month on ``today``."""
-    y, m = today.year, today.month + 1
-    for _ in range(3):
+def ng_last_trade(year: int, month: int) -> date:
+    """Last trading day of the NYMEX Henry Hub natural gas contract for delivery month (year,
+    month): three business days before the first calendar day of that month (weekends only)."""
+    d, count = date(year, month, 1), 0
+    while count < 3:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            count += 1
+    return d
+
+
+def front_month_expiry(today: date, rule=cl_last_trade) -> tuple[str, date]:
+    """(contract label, last trading day) of the front month on ``today`` under ``rule``."""
+    y, m = today.year, today.month
+    for _ in range(4):
         if m > 12:
             y, m = y + 1, m - 12
-        last = cl_last_trade(y, m)
+        last = rule(y, m)
         if last >= today:
             return date(y, m, 1).strftime("%b %Y"), last
         m += 1
@@ -105,8 +134,8 @@ def front_month_expiry(today: date) -> tuple[str, date]:
 
 
 class Calendar:
-    def __init__(self, path: Path | None = None):
-        self.path = path
+    def __init__(self, path: Path | None = None, recurring=WTI_RECURRING, jumps=None):
+        self.path, self.recurring, self.jumps = path, recurring, jumps
         self._mtime = None
         self.file_events: list[Event] = []
         self.roll_dates: set[str] = set()
@@ -124,7 +153,9 @@ class Calendar:
             for e in data.get("events", []):
                 at = datetime.fromisoformat(e["at"])
                 at = at.replace(tzinfo=ET) if at.tzinfo is None else at
-                events.append(Event(at.timestamp(), e["name"], e.get("impact", "medium"), "file", e.get("jump")))
+                impact = e.get("impact", "medium")
+                events.append(Event(at.timestamp(), e["name"], impact, "file",
+                                    e.get("jump", (self.jumps or {}).get(impact))))
             self.file_events = events
             self.roll_dates = set(data.get("roll_dates", []))
             self.skip = set(data.get("skip", []))
@@ -139,14 +170,14 @@ class Calendar:
         day = datetime.fromtimestamp(start, timezone.utc).astimezone(ET).date() - timedelta(days=1)
         last = datetime.fromtimestamp(end, timezone.utc).astimezone(ET).date()
         while day <= last:
-            for weekday, hour, minute, name, impact, first_week in RECURRING:
+            for weekday, hour, minute, name, impact, first_week in self.recurring:
                 if day.weekday() != weekday or (first_week and day.day > 7):
                     continue
                 if f"{day.isoformat()} {name}" in self.skip:
                     continue
                 at = datetime.combine(day, dtime(hour, minute), ET).timestamp()
                 if start <= at <= end:
-                    out.append(Event(at, name, impact))
+                    out.append(Event(at, name, impact, jump=(self.jumps or {}).get(impact)))
             day += timedelta(days=1)
         out += [e for e in self.file_events if start <= e.at <= end]
         return sorted(out, key=lambda e: e.at)

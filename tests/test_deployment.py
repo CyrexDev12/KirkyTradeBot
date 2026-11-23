@@ -180,7 +180,7 @@ def test_vm_update_preserves_secrets_and_recovers_on_failure(tmp_path, failure):
     if failure != 'build':
         import_commands = [call[-1] for call in calls if call[0] == 'run' and '--entrypoint' in call]
         assert any('backend.updown.worker' in code and 'backend.gold.worker' in code
-                   and 'backend.wti.worker' in code
+                   and 'backend.wti.worker' in code and 'backend.natgas.worker' in code
                    for code in import_commands)
 
 

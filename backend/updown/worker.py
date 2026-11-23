@@ -189,7 +189,7 @@ class Worker:
         rows = (await self.feed.seconds([product.index_id], lookback=int(self.clock() - end) + 70)).get(product.symbol, [])
         if product.rule == "point":
             price = point_price(rows, end)
-            return round(price, 2) if price is not None else None
+            return round(price, product.decimals) if price is not None else None
         vals = [p for t, p in rows if end - 60 <= t < end]
         return round(sum(vals) / len(vals), 2) if len(vals) >= 50 else None
 

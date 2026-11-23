@@ -1,0 +1,18 @@
+{
+  "_note": "Trimmed from live Polymarket US responses (read-only GETs) captured 2026-11-22 ~20:35 AZ.",
+  "event_15m": {"events": [{"slug": "natgas-updown-15m-2026-11-23-0330z", "title": "Natural Gas Up or Down 15m", "markets": [{
+    "slug": "cpngf-natgas-updown-15m-2026-11-23-0330z", "status": "MARKET_STATUS_OPEN", "feeCoefficient": 0.095,
+    "description": "This market will settle to Up if the price of natural gas futures at 10:45PM ET on Nov 22, 2026 is greater than or equal to the price of natural gas futures at 10:30PM ET on Nov 22, 2026. Otherwise, this market will settle to Down. Outcome sourced from Chainlink. The price of natural gas futures used for settlement is the mid price published in the Chainlink Natural Gas futures mid price data stream (NatGas/USD-Streams-FuturesPrice), rounded to four decimal places (0.00005 rounds up to 0.0001). Chainlink calculates this mid price from bid and ask quotes for the front-month Henry Hub natural gas futures contract.",
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "natgas"},
+      "horizon": "15m", "windowStart": "2026-11-23T03:30:00Z", "windowEnd": "2026-11-23T03:45:00Z",
+      "priceToBeat": {"value": "3.2678", "currency": "USD"}, "settlementPrice": null, "priceDecimals": 4,
+      "assetName": "Natural Gas", "priceUnit": "MMBtu"}}]}]},
+  "event_1d": {"events": [{"slug": "natgas-updown-1d-2026-11-22-2315z", "title": "Natural Gas Up or Down Daily", "markets": [{
+    "slug": "cpngf-natgas-updown-1d-2026-11-22-2315z", "status": "MARKET_STATUS_OPEN", "feeCoefficient": 0.095,
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "natgas"},
+      "horizon": "1d", "windowStart": "2026-11-22T23:15:00Z", "windowEnd": "2026-11-23T22:00:00Z",
+      "priceToBeat": {"value": "3.2863", "currency": "USD"}, "settlementPrice": null, "priceDecimals": 4}}]}]},
+  "book_1h": {"marketData": {"state": "MARKET_STATE_OPEN",
+    "bids": [{"px": {"value": "0.7600", "currency": "USD"}, "qty": "42.0000"}],
+    "offers": [{"px": {"value": "0.8100", "currency": "USD"}, "qty": "20.0000"}]}}
+}
