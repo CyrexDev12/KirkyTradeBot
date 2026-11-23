@@ -12,6 +12,7 @@ import pytest
 from backend.updown.feed import FeedError, Settlement, event_slug, parse_index, parse_window, settlement_price
 from backend.updown.strategy import Book, Settings, Window, wti_products
 from backend.wti import Rules
+from backend.wti.commodity import NATGAS, WTI
 from backend.wti.events import ET, Calendar, Detector, Event, cl_last_trade, front_month_expiry
 from backend.wti.models import MODEL_INFO, ModelSet, ewma_sigma, point_probability
 
@@ -191,6 +192,19 @@ class FakeFeed:
     async def minutes(self, ids, lookback=7200):
         self._count("minutes")
         return {"wti": list(enumerate(closes()))}
+
+
+@pytest.mark.parametrize("commodity", (WTI, NATGAS), ids=("wti", "natgas"))
+def test_desk_starts_with_environment_settings(tmp_path, monkeypatch, commodity):
+    from backend.wti.worker import Desk
+
+    monkeypatch.setenv(f"{commodity.env}_HORIZONS", "1h")
+    monkeypatch.setenv(f"{commodity.env}_MODELS", "A,E")
+    desk = Desk(None, directory=tmp_path, commodity=commodity)
+    assert list(desk.workers) == ["A", "E"]
+    for worker in desk.workers.values():
+        assert worker.settings is desk.settings
+        assert list(worker.products) == [f"{commodity.key}-1h"]
 
 
 def test_desk_runs_five_model_accounts_on_one_feed(tmp_path):

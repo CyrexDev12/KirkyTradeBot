@@ -119,13 +119,13 @@ tar -czf "$backup/source.tar.gz" -C "$app_dir" "${present[@]}"
 
 echo 'Building the new images while the existing services remain online...'
 "${new_compose[@]}" build
-echo 'Checking imports as the container app user before stopping live services...'
+echo 'Checking imports and energy desk startup before stopping live services...'
 for service in backend bot paper-worker; do
     if [[ "$service" == bot ]]; then
         imports='import bot.discord_bot; import bot.paper; import bot.player_stats; from matplotlib.backends.backend_agg import FigureCanvasAgg; from matplotlib.figure import Figure; FigureCanvasAgg(Figure()).draw()'
     elif [[ "$service" == backend ]]; then
-        # All three market workers use this same backend image.
-        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.wti.worker; import backend.natgas.worker'
+        # Build the desks with their production defaults using only disposable storage.
+        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.natgas.worker; from backend.wti.worker import Desk; from backend.wti.commodity import NATGAS; Desk(None); Desk(None, commodity=NATGAS)'
     else
         imports='import backend.app; import backend.trading.worker'
     fi
@@ -134,7 +134,7 @@ for service in backend bot paper-worker; do
         --tmpfs /data:uid=10001,gid=10001,mode=0700 \
         --tmpfs /state:uid=10001,gid=10001,mode=0700 --tmpfs /tmp \
         --entrypoint python "$project-$service:latest" \
-        -c "import os; assert os.getuid() == 10001; $imports; print('Imports passed: $service')"
+        -c "import os; assert os.getuid() == 10001; $imports; print('Startup checks passed: $service')"
 done
 echo 'Pausing services for a consistent backup of the databases and prediction files...'
 stopped=true

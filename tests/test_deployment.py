@@ -172,6 +172,8 @@ def test_vm_update_preserves_secrets_and_recovers_on_failure(tmp_path, failure):
         import_checks = [i for i, call in enumerate(calls) if call[0] == 'run' and '--entrypoint' in call]
         assert len(import_checks) == 3
         assert max(import_checks) < next(i for i, call in enumerate(calls) if 'stop' in call)
+        backend_check = calls[import_checks[0]][-1]
+        assert 'Desk(None); Desk(None, commodity=NATGAS)' in backend_check
     if failure not in ('build', 'imports', 'backup'):
         backups = list((home / 'nfl-backups').glob('*/nfl-fair-value_bot-state.tar.gz'))
         assert len(backups) == 1

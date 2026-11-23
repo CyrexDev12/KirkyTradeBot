@@ -6,23 +6,23 @@ This release updates simulated execution for crypto Up/Down, gold, WTI and natur
 
 ## Upload and start the update
 
-1. Use the prepared `.deploy/nfl-updown-execution-azure.zip`, or build it on your computer from the updated project. On macOS or Linux:
+1. Use the prepared `.deploy/nfl-updown-execution-hotfix-azure.zip`, or build it on your computer from the updated project. On macOS or Linux:
 
    ```bash
-   python3 deploy/package.py --output .deploy/nfl-updown-execution-azure.zip
+   python3 deploy/package.py --output .deploy/nfl-updown-execution-hotfix-azure.zip
    ```
 
    On Windows PowerShell:
 
    ```powershell
-   .\.venv\Scripts\python deploy/package.py --output .deploy/nfl-updown-execution-azure.zip
+   .\.venv\Scripts\python deploy/package.py --output .deploy/nfl-updown-execution-hotfix-azure.zip
    ```
 
-2. Open **Bash** Cloud Shell. Upload `nfl-updown-execution-azure.zip` using **Manage files → Upload**. Extract it into a fresh source directory.
+2. Open **Bash** Cloud Shell. Upload `nfl-updown-execution-hotfix-azure.zip` using **Manage files → Upload**. Extract it into a fresh source directory.
 
    ```bash
    nfl_update_dir="$(mktemp -d "$HOME/nfl-update.XXXXXX")"
-   unzip -q "$HOME/nfl-updown-execution-azure.zip" -d "$nfl_update_dir"
+   unzip -q "$HOME/nfl-updown-execution-hotfix-azure.zip" -d "$nfl_update_dir"
    cd "$nfl_update_dir"
    ```
 
@@ -49,7 +49,7 @@ You do not need to enter or reset the Discord token. The updater reads the exist
 ## What happens during the update
 
 - The source archive includes a SHA-256 manifest and LF endings for shell scripts. After extraction, source directories receive mode `0755` so the container's nonroot user can read nested packages. Private staging directories and secrets keep their restricted permissions. It excludes local credentials, cached data, and virtual environments.
-- New images build while the old services remain online. The updater checks imports for the API, Discord bot, and all workers before stopping the running services. It also verifies that the Discord image can render a graph without a display.
+- New images build while the old services remain online. Before stopping them, the updater checks imports, initializes the WTI and natural gas desks with their default settings on disposable storage, and verifies that the Discord image can render a graph without a display.
 - The updater stops the old services briefly to create consistent compressed backups of both named volumes, including SQLite journals, paper-account data, predictions, and Discord delivery records. Backup time depends on data size.
 - Application source and containers are replaced while the `.env` file, `.secrets` directory, `nfl-fair-value_predictions` volume, and `nfl-fair-value_bot-state` volume are retained. Existing forecasts, channel settings, alert history, and paper balances are not reset.
 - The backend and bot return first. A new model version triggers an immediate gradient model rebuild and versioned paper-model calibration. The updater waits for the current winner calibration and builds current gradient and Monte Carlo uncertainty profiles before starting the paper worker. This step can take several minutes. Prior forecasts and calibration artifacts stay available to the previous release during recovery.

@@ -126,7 +126,7 @@ class Desk:
             if model_id not in MODEL_INFO:
                 raise ValueError(f"Unknown {commodity.name} model {model_id!r}; choose from {', '.join(MODEL_INFO)}")
             store = Store(self.directory / "models" / model_id / "paper.sqlite3")
-            self.workers[model_id] = Worker(store, self.feed, settings, clock=clock,
+            self.workers[model_id] = Worker(store, self.feed, self.settings, clock=clock,
                                             fair_fn=self.modelset.fair_fn(model_id), gate=self.rules.gate,
                                             pre_exit=self.rules.pre_exit,
                                             tag={"model": model_id, "model_name": MODEL_INFO[model_id][0],
