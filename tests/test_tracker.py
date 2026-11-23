@@ -52,7 +52,7 @@ def test_collect_reads_gold_journal_and_isolates_failures(tmp_path, monkeypatch)
     _gold_trade(store, start + 900, side="DOWN")
     (gold_dir / "health.json").write_text(json.dumps(health(3, errors={})))
 
-    def broken(now):
+    def broken(now, limit=40):
         raise RuntimeError("journal locked")
 
     collectors = (("gold", "Gold Up/Down", "🥇", tracker._gold), ("nfl", "NFL Polymarket", "🏈", broken))
@@ -159,7 +159,51 @@ def test_chiefkirkey_command_group():
     bot.tree = app_commands.CommandTree(discord.Client(intents=discord.Intents.none()))
     register_chief_commands(bot)
     group = bot.tree.get_command("chiefkirkey")
-    assert {c.name for c in group.commands} == {"status", "trades", "bot", "alerts"}
+    assert {c.name for c in group.commands} == {"status", "trades", "bot", "fullroster", "alerts"}
+    roster_cmd = group.get_command("fullroster")
+    assert [p.display_name for p in roster_cmd.parameters] == ["bot", "show"]
+    assert {c.value for c in roster_cmd.parameters[1].choices} == {"all", "open", "closed"}
     trades = group.get_command("trades")
     assert [p.display_name for p in trades.parameters] == ["bot"] and not trades.parameters[0].required
     assert {c.value for c in group.get_command("bot").parameters[0].choices} == {"nfl", "btc", "updown", "gold"}
+
+
+def test_full_roster_totals_and_clean_tables(tmp_path, monkeypatch):
+    from backend.tracker import roster, summarize
+    from bot.tracker import ROSTER_HEADER, ROSTER_LINES, roster_cards, roster_row
+
+    monkeypatch.setenv("NFL_DATA_DIR", str(tmp_path))
+    from backend.updown import api as updown_api
+    updown_api._store.cache_clear()
+    (tmp_path / "gold").mkdir()
+    store = UpdownStore(tmp_path / "gold" / "paper.sqlite3")
+    base = int(NOW.timestamp()) // 900 * 900 - 900 * 60
+    for i in range(45):  # 45 settled gold bets: every third one loses
+        _, t = _gold_trade(store, base + 900 * i)
+        store.settle(t["id"], 3490.0 if i % 3 == 0 else 3510.0, base + 900 * i + 905)
+    _gold_trade(store, base + 900 * 45)  # one still open
+    (tmp_path / "gold" / "health.json").write_text(json.dumps(health(2)))
+    data = roster(NOW, (("gold", "Gold Up/Down", "🥇", tracker._gold),))
+    gold = data["desks"][0]
+    s = gold["summary"]
+    assert len(gold["trades"]) == 46 and s["closed"] == 45 and s["open"] == 1
+    assert (s["wins"], s["losses"]) == (30, 15) and s["win_rate"] == pytest.approx(30 / 45, abs=1e-4)
+    assert data["totals"]["net_pnl"] == s["net_pnl"] == pytest.approx(sum(t["pnl"] for t in gold["trades"]
+                                                                            if t["pnl"] is not None), abs=1e-3)
+    cards = roster_cards(data)
+    assert cards[0]["title"] == "🎖️ Chief Beef Kirkey · full roster" and "30W 15L" in cards[0]["description"]
+    pages = cards[1:]
+    assert [c["title"] for c in pages] == ["🥇 Gold Up/Down · 46 trade(s) · page 1/2",
+                                           "🥇 Gold Up/Down · 46 trade(s) · page 2/2"]
+    body = pages[0]["description"].splitlines()
+    assert body[0] == "```" and body[1] == ROSTER_HEADER and len(body) == ROSTER_LINES + 3
+    widths = {len(line.rstrip()) - len(line.rstrip().split("  ")[-1]) for line in body[2:-1]}
+    assert len(widths) == 1  # every row's columns line up
+    assert body[2].startswith("OPEN    gold-15m") and " open " in body[2]
+    assert len(roster_cards(data, "open")) == 2 and "open trades" in roster_cards(data, "open")[0]["title"]
+    assert all(len(c["description"]) < 4000 for c in cards)
+    row = roster_row({"status": "LOSS", "market": "KC-BUF · moneyline game 12", "side": "KC", "stake": 12.5,
+                      "pnl": -12.5, "at": "2026-11-23T01:05:00+00:00"})
+    assert row == "LOSS    KC-BUF · moneyline ga… KC       $12.50   -$12.50  11/22 6:05p"
+    assert summarize([])["roi"] is None
+    updown_api._store.cache_clear()

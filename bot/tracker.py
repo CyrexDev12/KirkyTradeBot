@@ -9,7 +9,8 @@ It reads ``/api/tracker`` (all paper desks: NFL, BTC spot, crypto Up/Down, gold)
 * posts a **status report** of all bots at the hours in ``CHIEF_REPORT_HOURS``
   (Arizona time, default ``8,20``);
 * answers ``/chiefkirkey status`` (every bot), ``/chiefkirkey trades [bot]``,
-  ``/chiefkirkey bot <bot>`` (one bot in depth) and ``/chiefkirkey alerts``.
+  ``/chiefkirkey bot <bot>`` (one bot in depth), ``/chiefkirkey fullroster [bot] [show]``
+  (every trade by every bot, as clean tables) and ``/chiefkirkey alerts``.
 
 Channel: ``/paper-channels set chief #channel``. A new channel starts from the
 current state, so it never floods old trades.
@@ -244,8 +245,81 @@ def alerts_card(status):
             "fields": [(f"{LIGHT[d['state']]} {d['emoji']} {d['name']}", desk_line(d)) for d in bad]}
 
 
+ROSTER_LINES = 40  # rows per page (keeps each Discord message well under its 6,000-character limit)
+ROSTER_PAGES = 12  # most pages one /chiefkirkey fullroster sends
+SHOW = {"all": None, "open": ("OPEN", "WORKING"), "closed": ("WIN", "LOSS", "OUT", "FLAT")}
+
+
+def _when(at):
+    if not at:
+        return "—"
+    try:
+        ts = datetime.fromisoformat(str(at).replace("Z", "+00:00")).astimezone(PHOENIX)
+    except ValueError:
+        return "—"
+    return ts.strftime("%m/%d %-I:%M") + ("a" if ts.hour < 12 else "p")
+
+
+def _cell(text, width):
+    text = str(text if text is not None else "—")
+    return (text[: width - 1] + "…") if len(text) > width else text.ljust(width)
+
+
+def _amount(x, signed=False):
+    if x is None:
+        return "—"
+    sign = "+" if signed and x > 0 else "-" if x < 0 else ""
+    return f"{sign}${abs(x):,.2f}"
+
+
+def roster_row(t):
+    pnl = _amount(t["pnl"], signed=True) if t["status"] not in ("OPEN", "WORKING") else "open"
+    return (f"{_cell(t['status'], 7)} {_cell(t['market'], 22)} {_cell(t.get('side'), 5)} "
+            f"{_amount(t.get('stake')).rjust(9)} {pnl.rjust(9)}  {_when(t.get('at'))}")
+
+
+ROSTER_HEADER = f"{'RESULT':7} {'MARKET':22} {'SIDE':5} {'STAKE':>9} {'P&L':>9}  WHEN (AZ)"
+
+
+def summary_text(s):
+    parts = [f"{s['closed']} closed · {s['wins']}W {s['losses']}L {s['outs']} out" +
+             (f" {s['flat']} flat" if s["flat"] else ""), f"{s['open']} open"]
+    parts.append(f"net {_amount(s['net_pnl'], signed=True)} on {_amount(s['staked'])} staked" +
+                 (f" ({s['roi']:+.1%})" if s.get("roi") is not None else ""))
+    if s.get("win_rate") is not None:
+        parts.append(f"{s['win_rate']:.0%} win rate")
+    return " · ".join(parts)
+
+
+def roster_cards(data, show="all"):
+    """Cards for /chiefkirkey fullroster: one summary, then each bot's trades as aligned tables."""
+    keep = SHOW[show]
+    t = data["totals"]
+    head = {"title": f"🎖️ {NAME} · full roster" + ("" if show == "all" else f" · {show} trades"),
+            "description": f"**All bots:** {summary_text(t)}", "footer": FOOTER,
+            "fields": [(f"{LIGHT.get(d['state'], '•')} {d['emoji']} {d['name']}"
+                        + (f" · {_money(d['balance'])}" if d.get("balance") is not None else ""),
+                        summary_text(d["summary"])) for d in data["desks"]]}
+    cards = [head]
+    for d in data["desks"]:
+        rows = [roster_row(x) for x in d["trades"] if keep is None or x["status"] in keep]
+        if not rows:
+            continue
+        pages = [rows[i:i + ROSTER_LINES] for i in range(0, len(rows), ROSTER_LINES)]
+        for n, page in enumerate(pages, 1):
+            label = f" · page {n}/{len(pages)}" if len(pages) > 1 else ""
+            cards.append({"title": f"{d['emoji']} {d['name']} · {len(rows)} trade(s){label}", "footer": FOOTER,
+                          "description": "```\n" + ROSTER_HEADER + "\n" + "\n".join(page) + "\n```"})
+    if len(cards) > ROSTER_PAGES:
+        hidden = len(cards) - ROSTER_PAGES + 1
+        cards = cards[:ROSTER_PAGES - 1] + [{"title": f"…{hidden} more page(s)", "footer": FOOTER,
+                                             "description": "Narrow it with the bot or show options, or open "
+                                                            "/api/tracker/roster for everything."}]
+    return cards
+
+
 def register_chief_commands(bot):
-    """``/chiefkirkey status | trades | bot | alerts``."""
+    """``/chiefkirkey status | trades | bot | fullroster | alerts``."""
     group = app_commands.Group(name="chiefkirkey", description="Chief Beef Kirkey: tracks every paper bot",
                                guild_only=True)
     choices = [app_commands.Choice(name=label, value=value) for value, label in BOTS]
@@ -281,6 +355,18 @@ def register_chief_commands(bot):
         status = await bot.api.tracker("/status")
         trades = (await bot.api.tracker("/trades", limit=60, desk=bot_name.value))["trades"]
         await send(interaction, bot_card(status, trades, bot_name.value))
+
+    @group.command(name="fullroster", description="Every trade by every bot, grouped by bot, with totals")
+    @app_commands.describe(bot_name="Only this bot", show="All trades, only open ones, or only closed ones")
+    @app_commands.rename(bot_name="bot")
+    @app_commands.choices(bot_name=choices, show=[app_commands.Choice(name=n, value=n) for n in SHOW])
+    async def roster_cmd(interaction: discord.Interaction, bot_name: app_commands.Choice[str] | None = None,
+                         show: app_commands.Choice[str] | None = None):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        params = {"desk": bot_name.value} if bot_name else {}
+        data = await bot.api.tracker("/roster", **params)
+        for card in roster_cards(data, show.value if show else "all"):
+            await interaction.followup.send(embed=publication_embed(card), ephemeral=True)
 
     @group.command(name="alerts", description="Only the bots that are down, erroring or at a loss limit")
     async def alerts_cmd(interaction: discord.Interaction):
