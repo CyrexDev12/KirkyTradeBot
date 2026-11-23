@@ -1,4 +1,4 @@
-"""Tracker: one read-only view over every paper-trading bot.
+"""Tracker: one read-only view over every paper-trading bot (data feed for Chief Beef Kirkey).
 
 It reads each desk's own journal and health file (it never writes to them) and
 returns, per desk, a traffic-light state plus balance, today's P&L, open risk and
