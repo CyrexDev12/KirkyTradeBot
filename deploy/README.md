@@ -147,7 +147,7 @@ Connect with the SSH command printed by the deployment, then use these commands 
 ```bash
 cd ~/nfl-fair-value
 sudo docker compose ps
-sudo docker compose logs --tail 100 backend bot paper-worker crypto-worker updown-worker gold-worker
+sudo docker compose logs --tail 100 backend bot paper-worker crypto-worker updown-worker gold-worker wti-worker
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 

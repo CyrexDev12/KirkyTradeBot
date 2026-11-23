@@ -22,12 +22,16 @@ brackets; gold uses the same names with ``GOLD_``):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import math
 import os
+from zoneinfo import ZoneInfo
 
 from .model import fair_value, taker_fee
 
-HORIZON_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
+HORIZON_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+EASTERN = ZoneInfo("America/New_York")
+DAILY_OPEN_ET = (18, 15)  # WTI daily windows run 6:15 PM ET -> 5:00 PM ET the next day
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,17 @@ class Product:
     @property
     def seconds(self) -> int:
         return HORIZON_SECONDS[self.horizon]
+
+    def current_start(self, now: float) -> int:
+        """Start of the window that contains ``now``. Intraday windows sit on the UTC clock; a
+        daily window (WTI) starts at 6:15 PM New York time the evening before its trading day."""
+        if self.horizon != "1d":
+            return int(now // self.seconds * self.seconds)
+        local = datetime.fromtimestamp(now, timezone.utc).astimezone(EASTERN)
+        opened = local.replace(hour=DAILY_OPEN_ET[0], minute=DAILY_OPEN_ET[1], second=0, microsecond=0)
+        if local < opened:
+            opened -= timedelta(days=1)
+        return int(opened.timestamp())
 
     @property
     def key(self) -> str:
@@ -58,6 +73,12 @@ def crypto_products(assets) -> tuple:
 
 def gold_products(horizons) -> tuple:
     return tuple(Product("gold", "commodity", h, "point", "PAXG-USD") for h in horizons)
+
+
+def wti_products(horizons) -> tuple:
+    """WTI crude: Chainlink front-month futures mid at the window start/end. Coinbase has no oil
+    market, so there is no outside cross-check (the desk guards with shock/roll detection instead)."""
+    return tuple(Product("wti", "commodity", h, "point", None) for h in horizons)
 
 
 @dataclass(frozen=True)
@@ -87,13 +108,15 @@ class Settings:
     @classmethod
     def from_env(cls, env=None, prefix="UPDOWN") -> "Settings":
         env = os.environ if env is None else env
-        gold = prefix == "GOLD"
+        gold = prefix in ("GOLD", "WTI")  # point-settled commodity desks share these defaults
 
         def get(name, default):
             return env.get(f"{prefix}_{name}", default)
 
         lo, hi = (float(x) for x in get("PRICE_RANGE", "0.10-0.90").split("-", 1))
-        if gold:
+        if prefix == "WTI":
+            products = wti_products(h.strip() for h in get("HORIZONS", "15m,1h,1d").split(",") if h.strip())
+        elif gold:
             products = gold_products(h.strip() for h in get("HORIZONS", "5m,15m,1h").split(",") if h.strip())
         else:
             products = crypto_products(a.strip().lower() for a in get("ASSETS", "btc,eth,sol").split(",") if a.strip())
@@ -112,7 +135,7 @@ class Settings:
         if not (0 <= s.take_profit_target < 1 and 0 <= s.stop_loss < 1):
             raise ValueError("Take-profit and stop-loss must be between 0 and 1")
         if any(p.horizon not in HORIZON_SECONDS for p in s.products):
-            raise ValueError("Up/Down horizons must be 5m, 15m or 1h")
+            raise ValueError("Up/Down horizons must be 5m, 15m, 1h or 1d")
         return s
 
 
@@ -196,7 +219,10 @@ class Decision:
 
 def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: float,
              closing_avg: float | None, coinbase_price: float | None, balance: float, open_stake: float,
-             today_pnl: float, held: bool, settings: Settings = SETTINGS) -> Decision:
+             today_pnl: float, held: bool, settings: Settings = SETTINGS, p_up: float | None = None,
+             cross_check: bool = True) -> Decision:
+    """``p_up`` lets a desk plug in its own fair-value model; ``cross_check=False`` is for
+    markets with no outside price to compare against (WTI)."""
     s = settings
     if held:
         return Decision("SKIP", "already holding this window")
@@ -204,14 +230,15 @@ def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: 
         return Decision("SKIP", f"market not open ({window.status})")
     if window.price_to_beat is None:
         return Decision("SKIP", "price to beat not published yet")
-    p_up = fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, closing_avg)
+    if p_up is None:
+        p_up = fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, closing_avg)
     if not window.start + s.entry_after_seconds <= now <= window.end - s.entry_before_end_seconds:
         return Decision("SKIP", "outside the entry part of the window", fair_up=p_up)
     if today_pnl <= -s.daily_loss_limit * (balance - today_pnl):
         return Decision("SKIP", "daily loss limit reached", fair_up=p_up)
-    if coinbase_price is None:
+    if cross_check and coinbase_price is None:
         return Decision("SKIP", "no fresh Coinbase price", fair_up=p_up)
-    if abs(coinbase_price / index_price - 1) > s.coinbase_max_gap:
+    if cross_check and abs(coinbase_price / index_price - 1) > s.coinbase_max_gap:
         return Decision("SKIP", "Coinbase and the settlement index disagree", fair_up=p_up)
     best = None
     for side, fair in (("UP", p_up), ("DOWN", 1 - p_up)):

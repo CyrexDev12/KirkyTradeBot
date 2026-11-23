@@ -20,6 +20,8 @@ The separate **Polymarket Up/Down** paper bot (`backend/updown`, see [docs/UPDOW
 
 The **gold** paper desk ([docs/GOLD.md](docs/GOLD.md)) runs the same engine on Polymarket's Gold Up or Down 15-minute and hourly markets (5-minute too once listed), with Coinbase PAXG-USD as the cross-check. Pick a channel with `/paper-channels set gold`; it posts every pick and its win, loss or early out. Use `/gold-picks`, `/gold-results`, `/gold-stats` and `/gold-account`.
 
+The **🛢️ WTI crude oil** paper desk ([docs/OIL.md](docs/OIL.md)) trades Polymarket's WTI Crude Up or Down 15-minute, hourly and daily markets with every gold feature: picks, wins, losses, outs, and the take-profit and stop-loss bracket. Five fair-value models compete live, each with its own $100 paper account: random walk, fast volatility, trend follower, market blend and news-aware. The desk tracks oil's news calendar (EIA, API, jobs report, rig count), pauses around high-impact releases, sells ahead of them when that loses nothing, and detects price shocks and futures-contract switches. Use `/paper-channels set oil`, `/oil leaderboard`, `/oil picks`, `/oil results` and `/oil info`.
+
 **🎖️ Chief Beef Kirkey** ([docs/TRACKER.md](docs/TRACKER.md)) tracks every paper bot: NFL, BTC spot, crypto Up/Down and gold.
 - **Commands:** `/chiefkirkey status`, `/chiefkirkey trades`, `/chiefkirkey bot`, `/chiefkirkey fullroster` (every trade by every bot, as clean tables) and `/chiefkirkey alerts`.
 - **Channel feed** (`/paper-channels set chief`): new trades and results, alerts when a bot goes down or hits a loss limit, and 8 AM / 8 PM Arizona status reports.

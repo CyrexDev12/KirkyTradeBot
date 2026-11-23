@@ -22,11 +22,12 @@ from discord import app_commands
 from .messages import timestamp
 
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "players", "chief")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "players", "chief", "oil")
 MARKER = "pub "
 ROUTE_NAMES = {"crypto": "₿ BTC + crypto Up/Down paper trades", "gold": "🥇 Gold Up/Down paper picks",
                "parlay": "🏈 Weekly NFL parlays", "players": "NFL player yardage picks",
                "chief": "🎖️ Chief Beef Kirkey (all-bot status + trade tracker)",
+               "oil": "🛢️ WTI crude Up/Down paper picks + oil news",
                "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
 
@@ -51,6 +52,8 @@ class PaperPosts:
                 CREATE TABLE IF NOT EXISTS crypto_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS updown_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS gold_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS oil_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS oil_info_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
             """)
 
     def connect(self):
@@ -90,7 +93,7 @@ class PaperPosts:
                 "SELECT guild_id, channel_id, event_id FROM paper_channels JOIN crypto_cursors USING (guild_id) "
                 "WHERE kind='crypto'")]
 
-    CURSOR_TABLES = ("updown_cursors", "gold_cursors")
+    CURSOR_TABLES = ("updown_cursors", "gold_cursors", "oil_cursors", "oil_info_cursors")
 
     def desk_routes(self, kind, table):
         """Routes for an Up/Down desk (crypto cards share the crypto channel, gold has its own).
@@ -457,6 +460,11 @@ def register_paper_commands(bot, posts: PaperPosts):
         if kind.value == "parlay":
             await interaction.response.send_message(f"🏈 Weekly parlay boards will post in {channel.mention}. "
                                                     "See the latest with /parlay.", ephemeral=True)
+            return
+        if kind.value == "oil":
+            await interaction.response.send_message(
+                f"🛢️ WTI crude picks, wins, losses, outs and oil news alerts will post in {channel.mention}. "
+                "Compare the models with /oil leaderboard.", ephemeral=True)
             return
         if kind.value == "chief":
             await interaction.response.send_message(

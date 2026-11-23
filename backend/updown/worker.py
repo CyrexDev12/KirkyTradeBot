@@ -16,7 +16,7 @@ import time
 import httpx
 
 from ..trading.venue import BASE, ReadOnlyVenueClient
-from .feed import Feed, FeedError, closing_minute_average, point_price, window_start
+from .feed import Feed, FeedError, closing_minute_average, point_price
 from .model import fair_value, sigma_per_second
 from .store import Store, data_directory
 from .strategy import SETTINGS, Settings, bracket_exit, early_exit, evaluate
@@ -27,8 +27,20 @@ ERRORS = (httpx.HTTPError, FeedError, ValueError, KeyError)
 
 
 class Worker:
-    def __init__(self, store: Store, feed: Feed, settings: Settings = SETTINGS, clock=time.time):
+    """One paper account. Optional hooks let a desk (WTI) plug in its own pieces:
+
+    * ``fair_fn(product, window, now, index_price, sigma, closing_avg, seconds, minutes, book)``
+      returns P(Up) in place of the built-in model (raise ValueError when it can't price);
+    * ``gate(product, window, now)`` returns a reason to hold off new entries (scheduled news,
+      a contract roll, a price shock), or None;
+    * ``pre_exit(trade, book, now, fair_up)`` returns a sale (like ``early_exit``) to get out of
+      an open bet ahead of scheduled news, or None.
+    """
+
+    def __init__(self, store: Store, feed: Feed, settings: Settings = SETTINGS, clock=time.time,
+                 fair_fn=None, gate=None, pre_exit=None, tag: dict | None = None):
         self.store, self.feed, self.settings, self.clock = store, feed, settings, clock
+        self.fair_fn, self.gate, self.pre_exit, self.tag = fair_fn, gate, pre_exit, tag or {}
         self.products = {p.key: p for p in settings.products}
         self.windows: dict[tuple, object] = {}
         self.errors: dict[str, str] = {}
@@ -57,7 +69,7 @@ class Worker:
         for trade in self.store.open_trades():
             await self._manage(trade, seconds, minutes)
         for product in self.products.values():
-            start = window_start(self.clock(), product.seconds)
+            start = product.current_start(self.clock())
             # A series that isn't listed (e.g. gold 5m, or gold on weekends) is re-checked once a minute.
             if self.clock() - self._missing.get((product.key, start), -1e9) < 60:
                 continue
@@ -106,9 +118,14 @@ class Worker:
                 self.errors[f"coinbase-{product.coinbase}"] = f"{type(exc).__name__}: {exc}"[:200]
         now = self.clock()
         index_price, sigma, avg = self._inputs(window, seconds, minutes, now)
+        p_up = self._fair(product, window, now, index_price, sigma, avg, seconds, minutes, book)
         snap = self.store.snapshot(now)
         decision = evaluate(window, book, now, index_price, sigma, avg, coinbase, snap["balance"],
-                            snap["open_stake"], snap["today_pnl"], held, self.settings)
+                            snap["open_stake"], snap["today_pnl"], held, self.settings, p_up=p_up,
+                            cross_check=bool(product.coinbase))
+        held_off = self.gate(product, window, now) if self.gate else None
+        if held_off and decision.action == "BUY":
+            decision.action, decision.reason = "SKIP", held_off
         self.store.observe(key, start, now, seconds_left=window.end - now, index_price=index_price,
                            coinbase=coinbase, fair_up=decision.fair_up,
                            yes_bid=book.yes_bids[0][0] if book.yes_bids else None,
@@ -116,7 +133,8 @@ class Worker:
         if decision.action == "BUY":
             trade = self.store.open(window, decision, now, {
                 "index_price": index_price, "coinbase_price": coinbase, "coinbase_product": product.coinbase,
-                "sigma_per_second": sigma, "seconds_left": round(window.end - now, 1), "rule": window.rule})
+                "sigma_per_second": sigma, "seconds_left": round(window.end - now, 1), "rule": window.rule,
+                **self.tag})
             if trade:
                 logger.info("PAPER BUY %s %s x%s @ %.3f", key, decision.side, decision.quantity, decision.price)
         self.store.note_window(key, start, decision.reason, now, window.price_to_beat)
@@ -138,8 +156,10 @@ class Worker:
                 now = self.clock()
                 index_price, sigma, avg = self._inputs(window, seconds.get(product.symbol),
                                                        minutes.get(product.symbol), now)
-                p_up = fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, avg)
-                sold = early_exit(trade["side"], trade["remaining"], book, p_up, trade["theta"], self.settings)
+                p_up = self._fair(product, window, now, index_price, sigma, avg, seconds.get(product.symbol),
+                                  minutes.get(product.symbol), book)
+                sold = (self.pre_exit(trade, book, now, p_up) if self.pre_exit else None) or \
+                    early_exit(trade["side"], trade["remaining"], book, p_up, trade["theta"], self.settings)
                 if sold:
                     self.store.partial_exit(trade["id"], sold, self.clock())
                 return
@@ -159,6 +179,11 @@ class Worker:
                     self.store.record_outcome(product.key, start, trade["price_to_beat"], close)
         except ERRORS as exc:
             self.errors[f"trade-{trade['id']}"] = f"{type(exc).__name__}: {exc}"[:200]
+
+    def _fair(self, product, window, now, index_price, sigma, avg, seconds, minutes, book):
+        if self.fair_fn:
+            return self.fair_fn(product, window, now, index_price, sigma, avg, seconds, minutes, book)
+        return fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, avg)
 
     async def _index_close(self, product, end):
         rows = (await self.feed.seconds([product.index_id], lookback=int(self.clock() - end) + 70)).get(product.symbol, [])
