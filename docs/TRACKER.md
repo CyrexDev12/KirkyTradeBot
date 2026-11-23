@@ -26,5 +26,5 @@ Each bot gets a light:
 | Endpoint | Returns |
 |---|---|
 | `/api/tracker/status` | Per bot: light, notes, heartbeat age, balance, all-time and today's P&L, open bets, $ at risk and recent record. Also totals across all bots. |
-| `/api/tracker/trades?limit=30&desk=gold` | One normalized feed of trades, newest first. Each trade has `desk`, `id`, `market`, `side`, `stake`, `status` and `pnl`. `status` is `OPEN`, `WORKING`, `WIN`, `LOSS`, `OUT` or `FLAT`. |
-| `/api/tracker/roster?desk=gold&limit=500` | Every trade per bot, with totals: record, outs, open bets, win rate, net P&L, amount staked and ROI. |
+| `/api/tracker/trades?limit=30&desk=gold` | One normalized feed of trades, newest first. Each trade has `desk`, `id`, `market`, `side`, `stake`, `status` and `pnl`. `status` is `OPEN`, `WORKING`, `WIN`, `LOSS`, `OUT` (sold above fair value), `TARGET` (take-profit hit), `STOP` (stop-loss hit) or `FLAT`. |
+| `/api/tracker/roster?desk=gold&limit=500` | Every trade per bot, with totals: record, outs, take-profits, stops, open bets, win rate, net P&L, amount staked and ROI. |

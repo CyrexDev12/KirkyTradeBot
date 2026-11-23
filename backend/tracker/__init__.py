@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 PHOENIX = ZoneInfo("America/Phoenix")
+CLOSED_STATUSES = ("WIN", "LOSS", "OUT", "TARGET", "STOP", "FLAT")
 STALE_SECONDS = {"nfl": 120, "btc": 180, "updown": 180, "gold": 180}
 DRAWDOWN_WARN = 0.20  # warn when balance is 20% or more below where the desk started
 
@@ -157,8 +158,8 @@ def _updown_like(desk_id, name, emoji, store, health_path, settings, now, limit=
     trades = []
     for t in store.trades(limit):
         if t.get("status") == "CLOSED":
-            status = ("OUT" if t.get("exit_reason") == "take_profit"
-                      else "WIN" if t.get("outcome") == t.get("side") else "LOSS")
+            status = {"take_profit": "OUT", "target": "TARGET", "stop_loss": "STOP"}.get(
+                t.get("exit_reason"), "WIN" if t.get("outcome") == t.get("side") else "LOSS")
         else:
             status = "OPEN"
         trades.append({"desk": desk_id, "id": str(t["id"]), "market": t.get("key") or t.get("asset"),
@@ -202,7 +203,7 @@ def _gold(now, limit=40):
 
 
 def _record(trades):
-    done = [t for t in trades if t["status"] in ("WIN", "LOSS", "OUT", "FLAT")]
+    done = [t for t in trades if t["status"] in CLOSED_STATUSES]
     return {"wins": sum(t["pnl"] > 0 for t in done), "losses": sum(t["pnl"] < 0 for t in done),
             "closed": len(done), "recent_pnl": round(sum(t["pnl"] for t in done), 4)}
 
@@ -236,12 +237,13 @@ def collect(now: datetime | None = None, collectors=COLLECTORS, limit: int = 40)
 def summarize(trades):
     """Totals over every trade given (the full roster, not just the recent ones)."""
     count = lambda status: sum(t["status"] == status for t in trades)  # noqa: E731
-    closed = [t for t in trades if t["status"] in ("WIN", "LOSS", "OUT", "FLAT")]
+    closed = [t for t in trades if t["status"] in CLOSED_STATUSES]
     staked = sum(t.get("stake") or 0 for t in closed)
     net = sum(t["pnl"] or 0 for t in closed)
     decided = sum(t["pnl"] != 0 for t in closed)
     return {"open": count("OPEN") + count("WORKING"), "wins": count("WIN"), "losses": count("LOSS"),
-            "outs": count("OUT"), "flat": count("FLAT"), "closed": len(closed), "net_pnl": round(net, 4),
+            "outs": count("OUT"), "targets": count("TARGET"), "stops": count("STOP"), "flat": count("FLAT"),
+            "closed": len(closed), "net_pnl": round(net, 4),
             "staked": round(staked, 4), "roi": round(net / staked, 4) if staked else None,
             "win_rate": round(sum((t["pnl"] or 0) > 0 for t in closed) / decided, 4) if decided else None}
 

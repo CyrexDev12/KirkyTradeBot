@@ -8,8 +8,9 @@ Two desks share this code:
   commands ``/gold-picks``, ``/gold-results``, ``/gold-stats``, ``/gold-account``.
 
 Each bet produces a **pick** card when entered and one result card when it ends:
-**win** (settled on the right side), **loss** (settled wrong) or **out** (sold early
-above fair value). Skips are not posted; the latest reasons are in the account card.
+**win** (settled on the right side), **loss** (settled wrong), **out** (sold early
+above fair value), **take profit** (the ticket's target was hit) or **stopped** (the
+ticket's stop-loss was hit). Skips are not posted; the latest reasons are in the account card.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,9 +61,36 @@ def risk_text(t):
             f"no new bets after a {t.get('daily_loss_limit', 0.10):.0%} daily loss.")
 
 
+def _signed(x):
+    return ("+" if x > 0 else "") + _money(x)
+
+
+def bracket_text(t):
+    """The ticket's take-profit / stop-loss lines, or None when the desk doesn't use them."""
+    tp, sl = t.get("take_profit_price"), t.get("stop_loss_price")
+    if tp is None and sl is None:
+        return None
+    lines = []
+    if tp is not None:
+        lines.append(f"🎯 **Take profit:** sell at **{_cents(tp)}** → {_signed(t['profit_at_take_profit'])}")
+    if sl is not None:
+        lines.append(f"🛑 **Stop loss:** sell at **{_cents(sl)}** → {_signed(t['loss_at_stop'])}")
+    if t.get("reward_to_risk") is not None:
+        lines.append(f"Reward-to-risk at the bracket **{t['reward_to_risk']:.2f} : 1**")
+    lines.append("Otherwise held to settlement. A stop sells into the bids that are there, so a fast move "
+                 "can fill below the stop; the most a bet can lose is still its stake.")
+    return "\n".join(lines)
+
+
 def result_label(t):
     if t.get("exit_reason") == "take_profit":
         return "💸 OUT", "sold early above fair value"
+    if t.get("exit_reason") == "target":
+        leg = (t.get("exits") or [{}])[-1]
+        return "🎯 TAKE PROFIT", f"take-profit hit · sold at {_cents(leg.get('price', 0))}"
+    if t.get("exit_reason") == "stop_loss":
+        leg = (t.get("exits") or [{}])[-1]
+        return "🛑 STOPPED", f"stop-loss hit · sold at {_cents(leg.get('price', 0))}"
     if t.get("outcome") == t.get("side"):
         return "✅ WIN", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
     return "❌ LOSS", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
@@ -92,6 +120,7 @@ def updown_trade_card(t, desk: Desk = CRYPTO):
                 ("Model vs market", f"Model gives {t['side'].title()} **{t['fair_side']:.0%}** · market charged "
                                     f"{_cents(t['entry_price'])} · edge {t['edge'] * 100:.1f}¢ per contract after fees"),
                 ("⚠️ Risk", risk_text(t)),
+                *([("🎯 Take profit / 🛑 Stop loss", bracket_text(t))] if bracket_text(t) else []),
                 ("Prices used", f"Settlement index {_money(t.get('index_price') or 0)} · {cross} · "
                                 f"{t.get('seconds_left', 0) / 60:.1f} min left")]}
 

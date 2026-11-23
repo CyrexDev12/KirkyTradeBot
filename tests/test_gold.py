@@ -159,3 +159,81 @@ def test_gold_api_is_mounted():
     paths = {r.path for r in router.routes}
     assert "app.include_router(gold_router)" in Path(app_module.__file__).read_text()
     assert {"/api/gold/account", "/api/gold/trades", "/api/gold/stats", "/api/gold/events"} <= paths
+
+
+def test_ticket_bracket_prices_and_metrics():
+    from backend.updown.model import taker_fee
+    from backend.updown.strategy import bracket_metrics, bracket_prices
+    assert bracket_prices(0.52, GOLD_SETTINGS) == (0.76, 0.26)
+    assert bracket_prices(0.95, GOLD_SETTINGS) == (0.98, 0.47)
+    assert bracket_prices(0.52, Settings()) == (None, None)  # crypto desk: off by default
+    cost = 10 * (0.52 + taker_fee(0.52, 0.095))
+    m = bracket_metrics(0.52, 10, cost, 0.095, GOLD_SETTINGS)
+    assert m["profit_at_take_profit"] == pytest.approx(10 * (0.76 - taker_fee(0.76, 0.095)) - cost, abs=1e-4)
+    assert m["loss_at_stop"] == pytest.approx(10 * (0.26 - taker_fee(0.26, 0.095)) - cost, abs=1e-4)
+    assert m["reward_to_risk"] == pytest.approx(m["profit_at_take_profit"] / -m["loss_at_stop"], abs=0.01)
+    with pytest.raises(ValueError):
+        Settings.from_env({"GOLD_STOP_LOSS": "1.5"}, prefix="GOLD")
+    assert Settings.from_env({"GOLD_STOP_LOSS": "0"}, prefix="GOLD").stop_loss == 0
+
+
+def test_pick_ticket_states_take_profit_and_stop_loss():
+    w = gold_window()
+    book = Book(((0.50, 300),), ((0.52, 300),), START + 300)
+    d = evaluate(w, book, START + 300, 3502.0, GOLD_SIGMA, None, 3512.0, 100.0, 0.0, 0.0, False, GOLD_SETTINGS)
+    assert d.action == "BUY" and d.risk["take_profit_price"] == 0.76 and d.risk["stop_loss_price"] == 0.26
+    trade = {"status": "OPEN", "asset": "gold", "horizon": "15m", "side": d.side, "quantity": d.quantity,
+             "entry_price": d.price, "entry_fee": d.fee, "cost": d.cost, "fair_side": d.fair_side, "edge": d.edge,
+             "window_start": "2026-11-20T18:00:00+00:00", "window_end": "2026-11-20T18:15:00+00:00",
+             "price_to_beat": 3500.0, **d.risk}
+    fields = dict(updown_trade_card(trade, GOLD)["fields"])
+    bracket = fields["🎯 Take profit / 🛑 Stop loss"]
+    assert "sell at **76¢** → +$" in bracket and "sell at **26¢** → -$" in bracket and "Reward-to-risk" in bracket
+    # Crypto tickets (bracket off) don't show the field.
+    plain = {**trade, "take_profit_price": None, "stop_loss_price": None}
+    assert "🎯 Take profit / 🛑 Stop loss" not in dict(updown_trade_card(plain, GOLD)["fields"])
+
+
+def test_bracket_exit_sells_at_target_or_stop_only():
+    from backend.updown.strategy import bracket_exit
+    trade = {"side": "UP", "remaining": 10, "theta": 0.095, "take_profit_price": 0.76, "stop_loss_price": 0.26}
+    mid = Book(((0.60, 100),), ((0.62, 100),), START)
+    assert bracket_exit(trade, mid, GOLD_SETTINGS) is None
+    hit = bracket_exit(trade, Book(((0.78, 100), (0.75, 100)), ((0.80, 100),), START), GOLD_SETTINGS)
+    assert hit["kind"] == "target" and hit["quantity"] == 10 and hit["price"] == pytest.approx(0.78)
+    thin = bracket_exit(trade, Book(((0.77, 8), (0.74, 100)), ((0.80, 100),), START), GOLD_SETTINGS)
+    assert thin["quantity"] == 4  # half the displayed size, never below the target price
+    stop = bracket_exit(trade, Book(((0.25, 10), (0.20, 100)), ((0.27, 100),), START), GOLD_SETTINGS)
+    assert stop["kind"] == "stop_loss" and stop["quantity"] == 10 and stop["price"] == pytest.approx((0.25 * 5 + 0.20 * 5) / 10)
+    # A Down holder sells at 1 - YES ask: YES ask 0.80 means Down bid 0.20, below a 0.26 stop.
+    down = {**trade, "side": "DOWN"}
+    assert bracket_exit(down, Book(((0.70, 100),), ((0.80, 100),), START), GOLD_SETTINGS)["kind"] == "stop_loss"
+    assert bracket_exit({**trade, "take_profit_price": None, "stop_loss_price": None}, mid, GOLD_SETTINGS) is None
+
+
+def test_worker_stops_out_a_losing_gold_pick_and_tracker_reports_it(tmp_path):
+    now = [START + 300.0]
+    store = Store(tmp_path / "gold.sqlite3")
+    feed = GoldFeed(lambda: now[0])
+    settings = Settings(products=gold_products(("15m",)), coinbase_max_gap=0.01, max_index_age=30,
+                        take_profit_target=0.5, stop_loss=0.5)
+    worker = Worker(store, feed, settings, clock=lambda: now[0])
+    asyncio.run(worker.tick())
+    [trade] = store.open_trades()
+    assert trade["stop_loss_price"] == 0.26 and trade["take_profit_price"] == 0.76
+
+    async def crashed_book(slug):
+        return Book(((0.22, 400),), ((0.24, 400),), now[0])
+
+    feed.book = crashed_book
+    now[0] = START + 420
+    asyncio.run(worker.tick())
+    [closed] = store.trades(5)
+    assert closed["status"] == "CLOSED" and closed["exit_reason"] == "stop_loss" and closed["net_pnl"] < 0
+    assert updown_trade_card(closed, GOLD)["title"].startswith("🛑 STOPPED · Gold 15-min")
+    assert trade_row(closed).startswith("🛑 STOPPED")
+    from backend import tracker
+    from backend.gold import SETTINGS as GS
+    desk, rows = tracker._updown_like("gold", "Gold Up/Down", "🥇", store, tmp_path / "missing.json", GS,
+                                      __import__("datetime").datetime.fromtimestamp(now[0], __import__("datetime").timezone.utc))
+    assert rows[0]["status"] == "STOP" and tracker.summarize(rows)["stops"] == 1
