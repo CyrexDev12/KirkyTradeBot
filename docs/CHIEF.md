@@ -37,6 +37,7 @@ Set its channel with `/paper-channels set chief #channel`. It posts three kinds 
 | `/chiefkirkey status` | Every bot: light, balance, all-time and today's P&L, open bets and $ at risk, recent record, heartbeat |
 | `/chiefkirkey trades [bot]` | The latest trades across all bots, or one bot's |
 | `/chiefkirkey bot <bot>` | One bot in depth: status, notes and its recent trades |
+| `/chiefkirkey fullroster [bot] [show]` | **Every trade by every bot**, grouped by bot, as aligned tables with the result, market, side, stake, P&L and Arizona time. Starts with totals for all bots and each bot: record, win rate, net P&L, staked and ROI. `show` picks all, open or closed trades. Long histories are split into pages of 40. |
 | `/chiefkirkey alerts` | Only the bots that are 🟡 or 🔴, and why |
 
 ## API
@@ -45,3 +46,4 @@ The same data is available read-only:
 
 - `GET /api/tracker/status`
 - `GET /api/tracker/trades?limit=30&desk=gold`
+- `GET /api/tracker/roster?desk=gold&limit=500`: every trade per bot, with totals

@@ -225,7 +225,7 @@ class NFLBot(discord.Client):
                 "🎲 **Polymarket Up/Down desk** · /updown-trades, /updown-stats, /updown-account.\n"
                 "🥇 **Gold desk** · /gold-picks, /gold-results, /gold-stats, /gold-account "
                 "(channel: /paper-channels set gold).\n"
-                "🎖️ **Chief Beef Kirkey** tracks every bot · /chiefkirkey status, trades, bot, alerts "
+                "🎖️ **Chief Beef Kirkey** tracks every bot · /chiefkirkey status, trades, bot, fullroster, alerts "
                 "(channel: /paper-channels set chief).\n"
                 "📣 **Server managers** · /paper-channels setup picks the BTC and parlay channels. "
                 "/paper-channels show lists them. /alerts setup turns on pregame predictions.",

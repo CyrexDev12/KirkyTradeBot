@@ -65,7 +65,7 @@ def _desk(desk_id, name, emoji, now, health, **fields):
 
 
 # ---------------------------------------------------------------- NFL desk
-def _nfl(now):
+def _nfl(now, limit=40):
     from ..trading.api import cfg, store
     from ..trading.worker import HEALTH_PATH
 
@@ -110,14 +110,14 @@ def _nfl(now):
 
 
 # ---------------------------------------------------------------- BTC spot
-def _btc(now):
+def _btc(now, limit=40):
     from ..crypto import strategy as spot
     from ..crypto.api import store
     from ..crypto.store import data_directory
 
     health = _read_health(data_directory() / "health.json")
     acct = store().account()
-    rows = store().trades(30)
+    rows = store().trades(limit)
     today_key = now.astimezone(PHOENIX).date().isoformat()
     with store().transaction() as db:
         today = db.execute("SELECT coalesce(sum(net_pnl),0) FROM decisions WHERE local_day=?", (today_key,)).fetchone()[0]
@@ -150,12 +150,12 @@ def _btc(now):
 
 
 # ---------------------------------------------------------------- Up/Down desks
-def _updown_like(desk_id, name, emoji, store, health_path, settings, now):
+def _updown_like(desk_id, name, emoji, store, health_path, settings, now, limit=40):
     health = _read_health(health_path)
     snap = store.snapshot(now.timestamp())
     acct = store.account(now.timestamp())
     trades = []
-    for t in store.trades(40):
+    for t in store.trades(limit):
         if t.get("status") == "CLOSED":
             status = ("OUT" if t.get("exit_reason") == "take_profit"
                       else "WIN" if t.get("outcome") == t.get("side") else "LOSS")
@@ -182,23 +182,23 @@ def _updown_like(desk_id, name, emoji, store, health_path, settings, now):
                  open_count=len(acct["open_trades"]), at_risk=acct["open_stake"], record=_record(trades)), trades
 
 
-def _updown(now):
+def _updown(now, limit=40):
     from ..updown.api import _store
     from ..updown.store import data_directory
     from ..updown.strategy import SETTINGS
 
     directory = data_directory()
     return _updown_like("updown", "Crypto Up/Down 15m", "🎲", _store(directory / "paper.sqlite3"),
-                        directory / "health.json", SETTINGS, now)
+                        directory / "health.json", SETTINGS, now, limit)
 
 
-def _gold(now):
+def _gold(now, limit=40):
     from ..gold import SETTINGS, data_directory
     from ..updown.api import _store
 
     directory = data_directory()
     return _updown_like("gold", "Gold Up/Down", "🥇", _store(directory / "paper.sqlite3"),
-                        directory / "health.json", SETTINGS, now)
+                        directory / "health.json", SETTINGS, now, limit)
 
 
 def _record(trades):
@@ -211,13 +211,13 @@ COLLECTORS = (("nfl", "NFL Polymarket", "🏈", _nfl), ("btc", "BTC spot (Coinba
               ("updown", "Crypto Up/Down 15m", "🎲", _updown), ("gold", "Gold Up/Down", "🥇", _gold))
 
 
-def collect(now: datetime | None = None, collectors=COLLECTORS):
+def collect(now: datetime | None = None, collectors=COLLECTORS, limit: int = 40):
     """Return ({desks: [...], totals: {...}}, trades) — each desk isolated from the others' failures."""
     now = now or datetime.now(timezone.utc)
     desks, trades = [], []
     for desk_id, name, emoji, fn in collectors:
         try:
-            desk, desk_trades = fn(now)
+            desk, desk_trades = fn(now, limit)
         except Exception as exc:  # one broken journal must not hide the other bots
             logger.warning("Tracker could not read %s: %s", desk_id, exc)
             desk, desk_trades = {"id": desk_id, "name": name, "emoji": emoji, "state": "down",
@@ -231,3 +231,29 @@ def collect(now: datetime | None = None, collectors=COLLECTORS):
               "at_risk": round(num("at_risk"), 2),
               "states": {s: sum(d["state"] == s for d in desks) for s in ("ok", "warn", "down")}}
     return {"mode": "PAPER_ONLY", "as_of": now.isoformat(), "desks": desks, "totals": totals}, trades
+
+
+def summarize(trades):
+    """Totals over every trade given (the full roster, not just the recent ones)."""
+    count = lambda status: sum(t["status"] == status for t in trades)  # noqa: E731
+    closed = [t for t in trades if t["status"] in ("WIN", "LOSS", "OUT", "FLAT")]
+    staked = sum(t.get("stake") or 0 for t in closed)
+    net = sum(t["pnl"] or 0 for t in closed)
+    decided = sum(t["pnl"] != 0 for t in closed)
+    return {"open": count("OPEN") + count("WORKING"), "wins": count("WIN"), "losses": count("LOSS"),
+            "outs": count("OUT"), "flat": count("FLAT"), "closed": len(closed), "net_pnl": round(net, 4),
+            "staked": round(staked, 4), "roi": round(net / staked, 4) if staked else None,
+            "win_rate": round(sum((t["pnl"] or 0) > 0 for t in closed) / decided, 4) if decided else None}
+
+
+def roster(now: datetime | None = None, collectors=COLLECTORS, limit: int = 500, desk: str | None = None):
+    """Every desk with all of its trades (newest first) and totals over them."""
+    status, trades = collect(now, [c for c in collectors if desk in (None, c[0])], limit)
+    out = []
+    for d in status["desks"]:
+        mine = [t for t in trades if t["desk"] == d["id"]]
+        out.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "state": d["state"],
+                    "balance": d.get("balance"), "starting_balance": d.get("starting_balance"),
+                    "summary": summarize(mine), "trades": mine})
+    every = [t for t in trades]
+    return {"mode": "PAPER_ONLY", "as_of": status["as_of"], "desks": out, "totals": summarize(every)}
