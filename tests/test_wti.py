@@ -27,10 +27,12 @@ def ts(*args, tz=timezone.utc):
 # ---- markets and windows ----------------------------------------------------------------
 def test_wti_settings_markets_and_daily_window():
     s = Settings.from_env({}, prefix="WTI")
-    assert [p.key for p in s.products] == ["wti-15m", "wti-1h", "wti-1d"]
+    assert [p.key for p in s.products] == ["wti-15m", "wti-1h"]  # daily is opt-in
     assert {p.coinbase for p in s.products} == {None} and {p.rule for p in s.products} == {"point"}
     assert s.products[0].index_id == "commodity:wti" and s.take_profit_target == 0.5 and s.stop_loss == 0.5
-    daily = s.products[2]
+    with_daily = Settings.from_env({"WTI_HORIZONS": "15m,1h,1d"}, prefix="WTI")
+    assert [p.key for p in with_daily.products] == ["wti-15m", "wti-1h", "wti-1d"]
+    daily = with_daily.products[2]
     # 10:30 PM ET Sunday -> the daily window that opened at 6:15 PM ET (23:15Z), as listed live.
     start = daily.current_start(ts(2026, 11, 23, 3, 30))
     assert start == ts(2026, 11, 22, 23, 15) and event_slug("wti", start, "1d") == "wti-updown-1d-2026-11-22-2315z"

@@ -10,7 +10,7 @@ The two desks run the same engine (`backend/wti`). Natural gas (`backend/natgas`
 |---|---|
 | `wti-updown-15m-…` | 15 minutes |
 | `wti-updown-1h-…` | hourly |
-| `wti-updown-1d-…` | daily: **6:15 PM ET → 5:00 PM ET** the next day. That's 23:15Z → 22:00Z in winter and 22:15Z → 21:00Z in summer. |
+| `wti-updown-1d-…` | daily: **6:15 PM ET → 5:00 PM ET** the next day. That's 23:15Z → 22:00Z in winter and 22:15Z → 21:00Z in summer. **Off by default**: the desks trade 15-minute and hourly windows. Turn the daily on with `WTI_HORIZONS=15m,1h,1d` or `NATGAS_HORIZONS=15m,1h,1d`. |
 
 - **Settlement.** Up if the price at the end ≥ the price at the start. Both are single readings of the **Chainlink front-month WTI futures mid** (`NY-USOIL/USD-Streams-FuturesPrice`), rounded to the cent. The bot reads the same price from Polymarket as `commodity:wti`.
 - **Fee.** The same as gold: `0.095 × p × (1 − p)` per contract.
@@ -110,7 +110,7 @@ The gas desk is the same engine with gas settings (`NATGAS_*`). Its journals liv
 
 | | Natural gas |
 |---|---|
-| Markets | `natgas-updown-15m / 1h / 1d-…`. The daily window is the same as WTI: 6:15 PM → 5 PM ET. |
+| Markets | `natgas-updown-15m / 1h-…` are traded. The daily `1d` window (6:15 PM → 5 PM ET, like WTI) is off by default; turn it on with `NATGAS_HORIZONS=15m,1h,1d`. |
 | Settles on | The Chainlink **front-month Henry Hub futures mid** (`NatGas/USD-Streams-FuturesPrice`), rounded to **4 decimals** |
 | Price feed | `commodity:natgas` |
 | Front month | Last trades three business days before the first day of the delivery month. For example, Dec 2026 last trades Nov 26 and Jan 2027 last trades Dec 29. Exchange holidays aren't modelled. |

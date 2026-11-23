@@ -6,7 +6,7 @@ price-shock awareness (``events.py``). ``commodity.py`` holds what differs per c
 
 Settings (``WTI_*`` for crude, ``NATGAS_*`` for gas; defaults match the gold desk unless noted):
 
-* ``WTI_HORIZONS`` [15m,1h,1d] · ``WTI_MODELS`` [A,B,C,D,E] · ``WTI_LEAD_MODEL`` [E] — the
+* ``WTI_HORIZONS`` / ``NATGAS_HORIZONS`` [15m,1h; add 1d for the daily window] · ``WTI_MODELS`` [A,B,C,D,E] · ``WTI_LEAD_MODEL`` [E] — the
   model whose picks post to the Discord oil channel (all models trade on paper either way)
 * ``WTI_NEWS_HOLD_BEFORE`` [120] / ``WTI_NEWS_HOLD_AFTER`` [60] — seconds around a high-impact
   release with no new entries
