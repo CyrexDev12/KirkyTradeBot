@@ -14,7 +14,7 @@ The archive lands in `~/nfl-exports/nfl-data-<time>.tar.gz` next to its `.sha256
 
 | Option | Effect |
 |---|---|
-| `--only LIST` | Export just part of the data. LIST is a comma list:<ul><li>a volume: `predictions` or `bot-state`</li><li>a bot's folder: `trading`, `crypto`, `updown` or `gold`</li><li>`bot`: the Discord bot's state (channel settings, alert history, posts)</li></ul>Example: `--only gold,bot`. |
+| `--only LIST` | Export just part of the data. LIST is a comma list:<ul><li>a volume: `predictions` or `bot-state`</li><li>a bot's folder: `trading`, `crypto`, `updown`, `gold` or `wti`</li><li>`bot`: the Discord bot's state (channel settings, alert history, posts)</li></ul>Example: `--only gold,bot` or `--only wti --csv` for every oil model's trades. |
 | `--csv` | Also write every database table as a CSV under `csv/`, readable in Excel or Sheets |
 | `--output DIR` | Save somewhere other than `~/nfl-exports` |
 | `--keep-on-vm` | Also keep the archive on the VM in `~/nfl-exports/<id>/`. By default it's deleted after a verified download. |
@@ -37,6 +37,7 @@ The archive's top-level folders are the volumes:
   - model outputs and forecasts
   - `trading/`: the NFL paper account
   - `crypto/`, `updown/` and `gold/`: those desks' journals and health files
+  - `wti/`: the oil desk, with one journal per model in `wti/models/A…E/` plus `info.sqlite3` (detected and announced news)
 - `bot-state/` holds the `nfl-fair-value_bot-state` volume: the Discord bot's channel settings, alert history and post receipts.
 - `csv/` appears with `--csv`: one CSV per database table.
 - `manifest.json` lists every file with its size and SHA-256, and every database's tables with their row counts.
