@@ -153,6 +153,10 @@ A separate `paper-worker` service runs a persistent $100 **paper** account. It r
 
 The yardage model blends recent and longer player history, carries or attempts, and efficiency. It adjusts for the opponent's yards allowed relative to the league. Robust limits reduce the influence of unusual yardage, workload, and defensive games. The interval uses the middle 80% of scaled errors from a chronological replay of the previous season. Picks compare model probabilities conditional on participation with the estimated cost of ten contracts, including exchange fees. A player with no qualifying snap settles under the venue's last fair market price rule.
 
+## Exporting the live data
+
+`bash deploy/azure/export.sh SUBSCRIPTION_ID [--only gold,bot] [--csv]` pulls a consistent snapshot of every bot's data off the Azure VM without stopping anything. See [deploy/EXPORT_AZURE.md](deploy/EXPORT_AZURE.md).
+
 ## API
 
 | Endpoint | Description |
