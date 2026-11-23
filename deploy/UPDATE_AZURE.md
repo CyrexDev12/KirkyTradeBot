@@ -153,3 +153,7 @@ Use Azure Portal → Virtual machines → **nfl-fair-value** → **Reset passwor
 ## Validation of this package
 
 Local tests cover the application and the deployment archive/update failure paths. A local Docker Engine and the school Azure subscription are not available to the preparing assistant, so successful container execution and the production update must be verified by the checks above in your account.
+
+## Exporting data
+
+To copy the live data off the VM without an update or any downtime, see [EXPORT_AZURE.md](EXPORT_AZURE.md).
