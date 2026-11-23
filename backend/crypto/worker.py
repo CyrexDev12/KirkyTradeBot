@@ -1,4 +1,4 @@
-"""Independent paper worker for alternate BTC 15-minute windows (Arizona time)."""
+"""Independent paper worker for BTC 15-minute windows (schedule set in strategy.Settings)."""
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json

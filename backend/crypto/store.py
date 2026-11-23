@@ -8,6 +8,7 @@ import sqlite3
 
 from .market import PRODUCT
 from .performance import pattern_label, performance, recent_patterns, record, summarize_pattern
+from . import strategy
 from .strategy import PHOENIX, paper_entry, paper_exit
 
 STARTING_BALANCE = 100.0
@@ -80,7 +81,7 @@ class Store:
             learning = None
             if self._open(db):
                 reason = "previous position still open"
-            elif today <= -0.015 * (balance - today):
+            elif today <= -strategy.SETTINGS.daily_loss_limit * (balance - today):
                 reason = "daily realized loss limit"
             elif signal and signal.direction and quote and not reason:
                 label = pattern_label(slot, signal.direction)

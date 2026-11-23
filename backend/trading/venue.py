@@ -15,6 +15,8 @@ field meanings and availability against captured responses):
 * GET /v1/markets/{slug}/book
 * GET /v1/price-history?symbol={slug}&...   (book-derived DISPLAY prices, not trades)
 * GET /v1/markets/{slug}/settlement
+* GET /v1/events?slug={slug}                (crypto Up/Down windows)
+* GET /v1/asset-prices/history?assets=...   (settlement index prices)
 
 The authenticated market WebSocket is optional and not implemented here; the
 public REST collector is the default.
@@ -39,6 +41,8 @@ ALLOWED_GET = tuple(re.compile(p) for p in (
     rf"^/v1/markets/{_SLUG}/(bbo|book|settlement)$",
     r"^/v1/price-history$",
     r"^/v1/events/[A-Za-z0-9_\-]{1,100}$",
+    r"^/v1/events$",  # ?slug=... lookup used by the crypto Up/Down paper bot
+    r"^/v1/asset-prices/history$",  # settlement-index (BRTI) price history
 ))
 
 

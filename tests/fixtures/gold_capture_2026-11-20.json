@@ -1,0 +1,26 @@
+{
+  "_note": "Trimmed from live Polymarket US responses (read-only GETs) captured 2026-11-22 for the 2026-11-20 18:00Z gold windows.",
+  "event_15m": {"events": [{"slug": "gold-updown-15m-2026-11-20-1800z", "title": "Gold Up or Down 15m", "markets": [{
+    "slug": "cpausp-gold-updown-15m-2026-11-20-1800z", "status": "MARKET_STATUS_RESOLVED", "feeCoefficient": 0.095,
+    "orderPriceMinTickSize": 0.01,
+    "description": "This market will settle to Up if the price of gold at 1:15PM ET on Nov 20, 2026 is greater than or equal to the price of gold at 1:00PM ET on Nov 20, 2026. Otherwise, this market will settle to Down. Outcome sourced from Chainlink. The price of gold used for settlement is the price of gold published in the Chainlink XAU/USD spot price data stream (XAU/USD-Streams-ForexPrice), rounded to the nearest cent.",
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "gold"},
+      "indexSymbol": "", "horizon": "15m", "windowStart": "2026-11-20T18:00:00Z", "windowEnd": "2026-11-20T18:15:00Z",
+      "priceToBeat": {"value": "3530.74", "currency": "USD"}, "settlementPrice": {"value": "3521.74", "currency": "USD"},
+      "priceDecimals": 2, "assetName": "Gold", "priceUnit": "oz", "nextWindowStart": "2026-11-20T18:15:00Z"}}]}]},
+  "event_1h": {"events": [{"slug": "gold-updown-1h-2026-11-20-1800z", "title": "Gold Up or Down Hourly", "markets": [{
+    "slug": "cpausp-gold-updown-1h-2026-11-20-1800z", "status": "MARKET_STATUS_RESOLVED", "feeCoefficient": 0.095,
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "gold"},
+      "horizon": "1h", "windowStart": "2026-11-20T18:00:00Z", "windowEnd": "2026-11-20T19:00:00Z",
+      "priceToBeat": {"value": "3530.74", "currency": "USD"}, "settlementPrice": {"value": "3535.14", "currency": "USD"}}}]}]},
+  "weekend_pre_open": {"events": [{"slug": "gold-updown-15m-2026-11-23-0000z", "markets": [{
+    "slug": "cpausp-gold-updown-15m-2026-11-23-0000z", "status": "MARKET_STATUS_CLOSED", "feeCoefficient": 0.095,
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "horizon": "15m", "windowStart": "2026-11-23T00:00:00Z",
+      "windowEnd": "2026-11-23T00:15:00Z", "priceToBeat": null, "settlementPrice": null}}]}]},
+  "index_1s_at_start": {"series": [{"asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "gold"}, "candles": [
+    {"timestamp": 1795197598, "open": "3530.64", "high": "3530.64", "low": "3530.64", "close": "3530.64", "tickCount": 1},
+    {"timestamp": 1795197599, "open": "3530.74", "high": "3530.74", "low": "3530.74", "close": "3530.74", "tickCount": 1},
+    {"timestamp": 1795197600, "open": "3530.74", "high": "3530.74", "low": "3530.74", "close": "3530.74", "tickCount": 1},
+    {"timestamp": 1795197601, "open": "3529.73", "high": "3529.73", "low": "3529.73", "close": "3529.73", "tickCount": 1}]}]},
+  "paxg_ticker": {"ask": "3543.73", "bid": "3542.8", "price": "3543.74", "time": "2026-11-22T20:10:36.096365869Z"}
+}

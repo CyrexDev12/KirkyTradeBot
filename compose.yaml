@@ -114,6 +114,54 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+  updown-worker:
+    image: nfl-fair-value-backend:latest
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "backend.updown.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NFL_DATA_DIR: /data
+    volumes:
+      - predictions:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import datetime as dt,json,pathlib; h=json.loads(pathlib.Path('/data/updown/health.json').read_text()); assert (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(h['last_heartbeat'])).total_seconds()<180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  gold-worker:
+    image: nfl-fair-value-backend:latest
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "backend.gold.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NFL_DATA_DIR: /data
+    volumes:
+      - predictions:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import datetime as dt,json,pathlib; h=json.loads(pathlib.Path('/data/gold/health.json').read_text()); assert (dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(h['last_heartbeat'])).total_seconds()<180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   predictions:
   bot-state:

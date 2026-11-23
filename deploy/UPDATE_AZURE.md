@@ -58,7 +58,7 @@ Docker volumes persist independently of containers. Avoid `docker compose down -
 
 ## Verify and configure Discord
 
-The last container table should show `backend`, `bot`, `paper-worker`, and `crypto-worker` as **healthy**, followed by `Update complete`.
+The last container table should show `backend`, `bot`, `paper-worker`, `crypto-worker`, `updown-worker`, and `gold-worker` as **healthy**, followed by `Update complete`.
 
 In Discord, run:
 
@@ -112,7 +112,7 @@ On the VM:
 ```bash
 cd ~/nfl-fair-value
 sudo docker compose ps -a
-sudo docker compose logs --no-color --tail 100 backend bot paper-worker crypto-worker
+sudo docker compose logs --no-color --tail 100 backend bot paper-worker crypto-worker updown-worker gold-worker
 curl -fsS http://127.0.0.1:8000/healthz
 curl -fsS http://127.0.0.1:8000/api/crypto/account
 ```

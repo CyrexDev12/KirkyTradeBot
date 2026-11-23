@@ -1,0 +1,28 @@
+{
+  "_note": "Trimmed from live Polymarket US responses captured 2026-11-22 19:18Z (read-only GETs).",
+  "event": {"events": [{"slug": "btc-updown-15m-2026-11-22-1915z", "seriesSlug": "btc-updown-15m", "markets": [{
+    "slug": "cpc-btc-updown-15m-2026-11-22-1915z", "status": "MARKET_STATUS_OPEN", "active": true, "closed": false,
+    "feeCoefficient": 0.095, "orderPriceMinTickSize": 0.01, "minimumTradeQty": 0.01,
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_CRYPTO", "symbol": "btc"},
+      "indexSymbol": "BRTI", "horizon": "15m", "windowStart": "2026-11-22T19:15:00Z", "windowEnd": "2026-11-22T19:30:00Z",
+      "priceToBeat": {"value": "60640.58", "currency": "USD"}, "settlementPrice": null, "priceDecimals": 2,
+      "nextWindowStart": "2026-11-22T19:30:00Z", "pendingPriceToBeat": null}}]}]},
+  "resolved_event": {"events": [{"slug": "btc-updown-15m-2026-11-22-1845z", "markets": [{
+    "slug": "cpc-btc-updown-15m-2026-11-22-1845z", "status": "MARKET_STATUS_RESOLVED", "closed": true, "feeCoefficient": 0.095,
+    "outcomePrices": "[\"1\",\"0\"]", "outcomes": "[\"Yes\",\"No\"]",
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "windowStart": "2026-11-22T18:45:00Z",
+      "windowEnd": "2026-11-22T19:00:00Z", "priceToBeat": {"value": "60610.83", "currency": "USD"},
+      "settlementPrice": {"value": "60677.03", "currency": "USD"}}}]}]},
+  "book": {"marketData": {"marketSlug": "cpc-btc-updown-15m-2026-11-22-1915z", "state": "MARKET_STATE_OPEN",
+    "transactTime": "2026-11-22T19:18:11.678852746Z",
+    "bids": [{"px": {"value": "0.4600", "currency": "USD"}, "qty": "993.5700"}, {"px": {"value": "0.4500", "currency": "USD"}, "qty": "588.0000"}, {"px": {"value": "0.4400", "currency": "USD"}, "qty": "553.3100"}],
+    "offers": [{"px": {"value": "0.4700", "currency": "USD"}, "qty": "157.0000"}, {"px": {"value": "0.4800", "currency": "USD"}, "qty": "633.5000"}, {"px": {"value": "0.4900", "currency": "USD"}, "qty": "616.0000"}]}},
+  "index_1s": {"series": [
+    {"asset": {"assetClass": "ASSET_CLASS_CRYPTO", "symbol": "btc"}, "candles": [
+      {"timestamp": 1795375027, "open": "60657.81", "high": "60657.81", "low": "60657.81", "close": "60657.81", "tickCount": 60},
+      {"timestamp": 1795375028, "open": "60657.81", "high": "60657.81", "low": "60657.81", "close": "60657.81", "tickCount": 0},
+      {"timestamp": 1795375117, "open": "60640.78", "high": "60640.78", "low": "60640.78", "close": "60640.78", "tickCount": 60}]},
+    {"asset": {"assetClass": "ASSET_CLASS_CRYPTO", "symbol": "eth"}, "candles": [
+      {"timestamp": 1795375027, "open": "1713.64", "high": "1713.64", "low": "1713.64", "close": "1713.64", "tickCount": 60},
+      {"timestamp": 1795375117, "open": "1713.72", "high": "1713.72", "low": "1713.72", "close": "1713.72", "tickCount": 60}]}]}
+}

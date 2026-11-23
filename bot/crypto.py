@@ -16,7 +16,7 @@ REASONS = {
     "15-minute trend confirmed by 5-minute momentum": "The 5-minute and 15-minute charts both leaned this way.",
     "15-minute volatility outside strategy range": "BTC’s price swings fell outside the trading range.",
     "fee-adjusted target exceeds three recent 15-minute average ranges":
-        "After fees, the target needed too big a move for 15 minutes.",
+        "Even a break-even-plus target needed too big a move after fees for 15 minutes.",
     "bid/ask spread too wide": "The gap between buy and sell prices was too wide.",
     "daily realized loss limit": "The paper account hit its loss limit for today.",
     "entry window expired while retrieving data": "The quote arrived after the entry window.",
@@ -55,6 +55,24 @@ def _planned_outcomes(trade):
     return " · ".join(lines)
 
 
+def risk_text(trade):
+    """Plain statement of what this paper trade risks, from the stored entry fields."""
+    if trade.get("risk_at_stop") is None:
+        return None
+    parts = [f"Up to **{_money(trade['risk_at_stop'])}** lost if the stop is hit"]
+    if trade.get("risk_pct") is not None:
+        parts[0] += f" ({trade['risk_pct']:.1%} of balance)"
+    if trade.get("position_value") is not None:
+        parts.append(f"position {_money(trade['position_value'])} ({trade['position_pct']:.0%} of balance)")
+    if trade.get("daily_loss_limit") is not None:
+        parts.append(f"no new trades after a {trade['daily_loss_limit']:.0%} daily loss")
+    text = " · ".join(parts)
+    if trade.get("fee_rate") is not None:
+        text += (f"\nA price gap can lose more than the stop amount. Assumes {trade['fee_rate']:.2%} fees each way "
+                 "(US Coinbase Advanced lists 0.50% maker / 0.90% taker).")
+    return text
+
+
 def crypto_trade_card(trade):
     status = trade["status"]
     card = {"footer": FOOTER, "description": f"15-minute window · {_time(trade['slot_at'])}", "fields": []}
@@ -80,6 +98,9 @@ def crypto_trade_card(trade):
     projections = _planned_outcomes(trade)
     if projections:
         card["fields"].append(("Estimated outcomes after costs", projections))
+    risk = risk_text(trade)
+    if risk:
+        card["fields"].append(("⚠️ Risk", risk))
     if trade.get("reason"):
         card["fields"].append(("Why this trade?", decision_reason(trade)))
     learning = trade.get("learning") or {}
@@ -101,6 +122,9 @@ def crypto_account_card(account):
         projections = _planned_outcomes(position)
         if projections:
             card["fields"].append(("Estimated outcomes after costs", projections))
+        risk = risk_text(position)
+        if risk:
+            card["fields"].append(("⚠️ Risk", risk))
     else:
         card["description"] += "\nNo BTC position open."
     decision = account.get("latest_decision")
