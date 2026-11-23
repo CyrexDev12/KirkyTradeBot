@@ -20,6 +20,18 @@
 2. **Out.** It sells early when the bid, after the exit fee, beats fair value by 1¢.
 3. **Win / loss.** Otherwise the bet settles on Polymarket's published settlement price. If none appears within 30 minutes, it settles on the index price at the end second.
 
+## Take profit and stop loss
+
+Every gold ticket has a bracket, stated on the pick card with its dollar result:
+
+- **🎯 Take profit.** It sells once the bid has captured **half the room between the entry price and $1** (`GOLD_TAKE_PROFIT=0.5`). A 52¢ entry has a 76¢ target.
+- **🛑 Stop loss.** It sells once the bid has fallen to **half the entry price** (`GOLD_STOP_LOSS=0.5`). A 52¢ entry has a 26¢ stop.
+- **Ticket numbers.** The card shows the profit at the target, the loss at the stop (both after the exit fee), and the reward-to-risk between them.
+
+A take-profit only sells at or above its price. A stop sells into whatever bids are there, so a fast move can fill below the stop. The most a bet can lose is still its stake. Bets that hit neither price are held to settlement, and the fair-value early exit (💸 OUT) still applies. Set either variable to `0` to turn that side off. The crypto Up/Down desk keeps its bracket off by default (`UPDOWN_TAKE_PROFIT`, `UPDOWN_STOP_LOSS`).
+
+Result cards add **🎯 TAKE PROFIT** and **🛑 STOPPED** to win, loss and out.
+
 ## Model check
 
 On one-minute gold history from Nov 16–20, 2026, the Brier score was 0.16 halfway through both the 15-minute (455 windows) and hourly (110 windows) markets. A coin flip scores 0.25. Gold fell about 9% that week, so the mid-range estimates ran slightly high. `/gold-stats` keeps scoring the model against the market mid as live samples come in.
@@ -38,6 +50,8 @@ Every pick card states the risk. The defaults match the crypto desk and are chan
 | Contract price range | 10–90¢ | `GOLD_PRICE_RANGE` |
 | Max PAXG gap | 1% | `GOLD_COINBASE_MAX_GAP` |
 | Horizons traded | 5m,15m,1h | `GOLD_HORIZONS` |
+| Take profit | sell at half the room to $1 | `GOLD_TAKE_PROFIT` |
+| Stop loss | sell at half the entry price | `GOLD_STOP_LOSS` |
 
 ## Running it
 

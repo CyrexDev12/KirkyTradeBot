@@ -13,6 +13,10 @@ brackets; gold uses the same names with ``GOLD_``):
 * ``UPDOWN_MAX_OPEN_STAKE`` [0.15] — max total stake across open bets
 * ``UPDOWN_DAILY_LOSS_LIMIT`` [0.10] — no new bets after this realized loss in an Arizona day
 * ``UPDOWN_TAKE_PROFIT_EDGE`` [0.01] — sell early when the bid beats fair value by this much after fees
+* ``UPDOWN_TAKE_PROFIT`` [off; gold 0.5] — take-profit target: sell once the bid has captured this share
+  of the room between the entry price and $1 (0.5 on a 52¢ entry = 76¢)
+* ``UPDOWN_STOP_LOSS`` [off; gold 0.5] — stop-loss: sell once the bid has fallen this share of the
+  entry price (0.5 on a 52¢ entry = 26¢)
 * ``UPDOWN_COINBASE_MAX_GAP`` [0.002] — skip when Coinbase and the settlement index disagree by more
 """
 from __future__ import annotations
@@ -73,6 +77,8 @@ class Settings:
     participation: float = 0.5
     default_theta: float = 0.095
     max_index_age: float = 10.0  # seconds; older settlement-index prices are treated as stale
+    take_profit_target: float = 0.0  # share of (1 - entry) to capture before selling; 0 = hold to settlement
+    stop_loss: float = 0.0  # share of the entry price to lose before selling; 0 = no stop
 
     @property
     def assets(self) -> tuple:
@@ -98,9 +104,13 @@ class Settings:
                 take_profit_edge=float(get("TAKE_PROFIT_EDGE", 0.01)),
                 # PAXG (tokenized gold) trades at a small premium to spot, so gold allows a wider gap.
                 coinbase_max_gap=float(get("COINBASE_MAX_GAP", 0.01 if gold else 0.002)),
-                max_index_age=float(get("MAX_INDEX_AGE", 30 if gold else 10)))
+                max_index_age=float(get("MAX_INDEX_AGE", 30 if gold else 10)),
+                take_profit_target=float(get("TAKE_PROFIT", 0.5 if gold else 0)),
+                stop_loss=float(get("STOP_LOSS", 0.5 if gold else 0)))
         if not (0 < s.price_min < s.price_max < 1 and 0 < s.max_stake <= s.max_open_stake <= 1):
             raise ValueError("Invalid Up/Down settings")
+        if not (0 <= s.take_profit_target < 1 and 0 <= s.stop_loss < 1):
+            raise ValueError("Take-profit and stop-loss must be between 0 and 1")
         if any(p.horizon not in HORIZON_SECONDS for p in s.products):
             raise ValueError("Up/Down horizons must be 5m, 15m or 1h")
         return s
@@ -143,6 +153,30 @@ class Book:
         if side == "UP":
             return self.yes_bids
         return tuple((round(1 - p, 6), q) for p, q in self.yes_offers)
+
+
+def bracket_prices(entry: float, settings: Settings):
+    """(take-profit price, stop-loss price) on the 1¢ tick; None where switched off."""
+    tp = sl = None
+    if settings.take_profit_target:
+        tp = min(0.99, math.ceil((entry + settings.take_profit_target * (1 - entry)) * 100 - 1e-9) / 100)
+    if settings.stop_loss:
+        sl = max(0.01, math.floor(entry * (1 - settings.stop_loss) * 100 + 1e-9) / 100)
+    return tp, sl
+
+
+def bracket_metrics(entry: float, qty: int, cost: float, theta: float, settings: Settings) -> dict:
+    """What the ticket states: exit prices and the P&L if each one fills (after the exit fee)."""
+    tp, sl = bracket_prices(entry, settings)
+    out = {"take_profit_price": tp, "stop_loss_price": sl, "profit_at_take_profit": None, "loss_at_stop": None,
+           "reward_to_risk": None}
+    if tp is not None:
+        out["profit_at_take_profit"] = round(qty * (tp - taker_fee(tp, theta)) - cost, 4)
+    if sl is not None:
+        out["loss_at_stop"] = round(qty * (sl - taker_fee(sl, theta)) - cost, 4)
+    if tp is not None and sl is not None and out["loss_at_stop"] < 0:
+        out["reward_to_risk"] = round(out["profit_at_take_profit"] / -out["loss_at_stop"], 2)
+    return out
 
 
 @dataclass
@@ -225,7 +259,7 @@ def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: 
             "payout_if_right": float(qty), "profit_if_right": round(qty - gross - fee, 4),
             "expected_profit": round(qty * fair - gross - fee, 4), "open_stake_after": open_stake + gross + fee,
             "kelly_fraction": s.kelly_fraction, "max_stake_pct": s.max_stake,
-            "daily_loss_limit": s.daily_loss_limit}
+            "daily_loss_limit": s.daily_loss_limit, **bracket_metrics(avg, qty, gross + fee, window.theta, s)}
     return Decision("BUY", f"{side} fair {fair:.1%} vs {avg * 100:.0f}c ask", side=side, fair_up=p_up,
                     fair_side=fair, price=avg, quantity=qty, fee=fee, cost=gross + fee,
                     edge=(qty * fair - gross - fee) / qty, risk=risk)
@@ -250,3 +284,37 @@ def early_exit(side: str, quantity: int, book: Book, fair_up_now: float, theta: 
     if sold <= 0:
         return None
     return {"quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee, "fair_side": fair}
+
+
+def bracket_exit(trade: dict, book: Book, settings: Settings = SETTINGS):
+    """Act on the ticket's take-profit / stop-loss. Returns a sale like ``early_exit`` with ``kind``
+    "target" or "stop_loss", or None. A stop sells into whatever bids are there (it can fill below
+    the stop price if the book is thin); a target only sells at or above its price."""
+    side, remaining, theta = trade["side"], trade["remaining"], trade["theta"]
+    tp, sl = trade.get("take_profit_price"), trade.get("stop_loss_price")
+    bids = book.side_bids(side)
+    if remaining <= 0 or not bids or (tp is None and sl is None):
+        return None
+    best = bids[0][0]
+    if tp is not None and best >= tp - 1e-9:
+        kind, floor = "target", tp
+    elif sl is not None and best <= sl + 1e-9:
+        kind, floor = "stop_loss", 0.0
+    else:
+        return None
+    sold, proceeds, fee = 0, 0.0, 0.0
+    for price, displayed in bids:
+        if price < floor - 1e-9:
+            break
+        take = min(remaining - sold, int(displayed * settings.participation))
+        if take <= 0:
+            continue
+        sold += take
+        proceeds += price * take
+        fee += taker_fee(price, theta) * take
+        if sold >= remaining:
+            break
+    if sold <= 0:
+        return None
+    return {"kind": kind, "quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee,
+            "fair_side": None, "trigger": tp if kind == "target" else sl}

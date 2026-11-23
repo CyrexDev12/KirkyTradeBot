@@ -161,13 +161,14 @@ class Store:
             if take <= 0:
                 return None
             scale = take / exit_data["quantity"]
-            leg = {"kind": "take_profit", "at": iso(now), "quantity": take, "price": round(exit_data["price"], 6),
+            kind = exit_data.get("kind", "take_profit")
+            leg = {"kind": kind, "at": iso(now), "quantity": take, "price": round(exit_data["price"], 6),
                    "proceeds": round(exit_data["gross"] * scale, 6), "fee": round(exit_data["fee"] * scale, 6),
                    "fair_side": exit_data["fair_side"]}
             trade["exits"].append(leg)
             trade["remaining"] -= take
             if trade["remaining"] == 0:
-                self._close(db, trade, now, "take_profit")
+                self._close(db, trade, now, kind)
             else:
                 self._save(db, trade)
             return trade

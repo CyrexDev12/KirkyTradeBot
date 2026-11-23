@@ -19,7 +19,7 @@ from ..trading.venue import BASE, ReadOnlyVenueClient
 from .feed import Feed, FeedError, closing_minute_average, point_price, window_start
 from .model import fair_value, sigma_per_second
 from .store import Store, data_directory
-from .strategy import SETTINGS, Settings, early_exit, evaluate
+from .strategy import SETTINGS, Settings, bracket_exit, early_exit, evaluate
 
 logger = logging.getLogger(__name__)
 FALLBACK_AFTER = 1800  # seconds after window end before using the index-derived close
@@ -131,6 +131,10 @@ class Worker:
             if now < end:
                 window = await self._window(product, start)
                 book = await self.feed.book(trade["market_slug"])
+                bracket = bracket_exit(trade, book, self.settings)
+                if bracket:  # the ticket's take-profit or stop-loss was hit
+                    self.store.partial_exit(trade["id"], bracket, self.clock())
+                    return
                 now = self.clock()
                 index_price, sigma, avg = self._inputs(window, seconds.get(product.symbol),
                                                        minutes.get(product.symbol), now)
