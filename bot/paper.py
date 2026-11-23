@@ -22,9 +22,10 @@ from discord import app_commands
 from .messages import timestamp
 
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "chief")
 MARKER = "pub "
 ROUTE_NAMES = {"crypto": "₿ BTC + crypto Up/Down paper trades", "gold": "🥇 Gold Up/Down paper picks",
+               "chief": "🎖️ Chief Beef Kirkey (all-bot status + trade tracker)",
                "parlay": "🏈 Weekly NFL parlays",
                "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
@@ -72,7 +73,7 @@ class PaperPosts:
 
     def configured_nfl_routes(self):
         with closing(self.connect()) as db:
-            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind NOT IN ('crypto','gold')")]
+            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind NOT IN ('crypto','gold','chief')")]
 
     def configure_crypto(self, guild_id, channel_id, latest_event_id, *, parlay_channel_id=None):
         with closing(self.connect()) as db, db:
@@ -432,7 +433,7 @@ def register_paper_commands(bot, posts: PaperPosts):
                  for kind, name in ROUTE_NAMES.items()]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @group.command(name="set", description="Choose a channel for NFL picks, updates, reports, the weekly parlay, BTC or gold paper trades")
+    @group.command(name="set", description="Choose a channel for NFL picks, reports, parlays, BTC, gold or the Chief tracker")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.choices(kind=[app_commands.Choice(name=k, value=k) for k in KINDS])
     async def set_channel(interaction: discord.Interaction, kind: app_commands.Choice[str], channel: discord.TextChannel):
@@ -447,6 +448,12 @@ def register_paper_commands(bot, posts: PaperPosts):
             await reply(interaction, f"₿ BTC paper entries, exits and skips will post in {channel.mention}.")
             return
         posts.set_channel(interaction.guild_id, kind.value, channel.id)
+        if kind.value == "chief":
+            await interaction.response.send_message(
+                f"🎖️ Chief Beef Kirkey will track every bot in {channel.mention}: every new trade and result, "
+                "alerts when a bot goes down or hits its loss limit, and status reports at 8 AM and 8 PM Arizona. "
+                "Use /chiefkirkey status any time.", ephemeral=True)
+            return
         if kind.value == "gold":
             await interaction.response.send_message(
                 f"🥇 Gold picks, wins, losses and outs will post in {channel.mention}. "

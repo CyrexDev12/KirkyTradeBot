@@ -43,6 +43,9 @@ class PredictionAPI:
     async def gold(self, path, **params):
         return await self.get("/api/gold" + path, **params)
 
+    async def tracker(self, path, **params):
+        return await self.get("/api/tracker" + path, **params)
+
     def _operator_headers(self):
         if not self.token:
             raise PermissionError("NFL_PAPER_OPERATOR_TOKEN is not configured for the bot")
