@@ -8,6 +8,8 @@ record, and a single normalized list of recent trades across all desks:
 * ``btc``     — BTC spot paper bot on Coinbase (``backend.crypto``)
 * ``updown``  — Polymarket crypto Up/Down 15m (``backend.updown``)
 * ``gold``    — Polymarket gold Up/Down 5m/15m/1h (``backend.gold``)
+* ``oil-A`` … ``oil-E`` — Polymarket WTI crude Up/Down, one desk per competing model (``backend.wti``)
+* ``gas-A`` … ``gas-E`` — Polymarket natural gas Up/Down, one desk per competing model (``backend.natgas``)
 
 States: ``ok`` (healthy), ``warn`` (running but erroring, paused, at its daily loss
 limit or in a deep drawdown), ``down`` (no heartbeat or a stale one).
@@ -23,7 +25,7 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 PHOENIX = ZoneInfo("America/Phoenix")
 CLOSED_STATUSES = ("WIN", "LOSS", "OUT", "TARGET", "STOP", "FLAT")
-STALE_SECONDS = {"nfl": 120, "btc": 180, "updown": 180, "gold": 180}
+STALE_SECONDS = {"nfl": 120, "btc": 180, "updown": 180, "gold": 180, "oil": 180, "gas": 180}
 DRAWDOWN_WARN = 0.20  # warn when balance is 20% or more below where the desk started
 
 
@@ -51,7 +53,7 @@ def _desk(desk_id, name, emoji, now, health, **fields):
     notes = list(fields.pop("notes", []))
     if health is None:
         state, notes = "down", ["worker not running (no heartbeat file)"] + notes
-    elif age is None or age > STALE_SECONDS[desk_id]:
+    elif age is None or age > STALE_SECONDS.get(desk_id.split("-")[0], 180):
         state = "down"
         notes = [f"no heartbeat for {int(age // 60) if age else '?'} min"] + notes
     else:
@@ -151,14 +153,17 @@ def _btc(now, limit=40):
 
 
 # ---------------------------------------------------------------- Up/Down desks
-def _updown_like(desk_id, name, emoji, store, health_path, settings, now, limit=40):
+def _updown_like(desk_id, name, emoji, store, health_path, settings, now, limit=40, error_prefix=None):
     health = _read_health(health_path)
+    if health and error_prefix:  # a shared worker (WTI): keep this model's errors and the desk's own
+        health = {**health, "errors": {k: v for k, v in (health.get("errors") or {}).items()
+                                       if k.startswith(error_prefix) or ":" not in k}}
     snap = store.snapshot(now.timestamp())
     acct = store.account(now.timestamp())
     trades = []
     for t in store.trades(limit):
         if t.get("status") == "CLOSED":
-            status = {"take_profit": "OUT", "target": "TARGET", "stop_loss": "STOP"}.get(
+            status = {"take_profit": "OUT", "pre_news": "OUT", "target": "TARGET", "stop_loss": "STOP"}.get(
                 t.get("exit_reason"), "WIN" if t.get("outcome") == t.get("side") else "LOSS")
         else:
             status = "OPEN"
@@ -208,8 +213,27 @@ def _record(trades):
             "closed": len(done), "recent_pnl": round(sum(t["pnl"] for t in done), 4)}
 
 
+def _energy(commodity, model_id):
+    def collect_model(now, limit=40):
+        from ..updown.api import _store
+        from ..wti.models import MODEL_INFO
+        directory = commodity.directory()
+        return _updown_like(f"{commodity.tracker}-{model_id}", f"{commodity.short} · {model_id} {MODEL_INFO[model_id][0]}",
+                            commodity.emoji, _store(directory / "models" / model_id / "paper.sqlite3"),
+                            directory / "health.json", commodity.settings(), now, limit, error_prefix=f"{model_id}:")
+    return collect_model
+
+
+def _energy_collectors():
+    from ..wti.commodity import NATGAS, WTI
+    from ..wti.models import MODEL_INFO
+    return tuple((f"{c.tracker}-{m}", f"{c.short} · {m} {MODEL_INFO[m][0]}", c.emoji, _energy(c, m))
+                 for c in (WTI, NATGAS) for m in c.models() if m in MODEL_INFO)
+
+
 COLLECTORS = (("nfl", "NFL Polymarket", "🏈", _nfl), ("btc", "BTC spot (Coinbase)", "₿", _btc),
-              ("updown", "Crypto Up/Down 15m", "🎲", _updown), ("gold", "Gold Up/Down", "🥇", _gold))
+              ("updown", "Crypto Up/Down 15m", "🎲", _updown), ("gold", "Gold Up/Down", "🥇", _gold),
+              *_energy_collectors())
 
 
 def collect(now: datetime | None = None, collectors=COLLECTORS, limit: int = 40):

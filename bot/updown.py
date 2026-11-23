@@ -24,7 +24,13 @@ from .paper import _money, publication_embed
 logger = logging.getLogger(__name__)
 
 SIDE = {"UP": "📈 Up", "DOWN": "📉 Down"}
-HORIZON = {"5m": "5-min", "15m": "15-min", "1h": "hourly"}
+HORIZON = {"5m": "5-min", "15m": "15-min", "1h": "hourly", "1d": "daily"}
+NAMES = {"gold": "Gold", "wti": "WTI", "natgas": "Nat gas"}
+DECIMALS = {"natgas": 4}  # settlement prices: natural gas is quoted to 4 decimals
+
+
+def _price(t, value):
+    return f"${value or 0:,.{DECIMALS.get(t.get('asset'), 2)}f}"
 
 
 @dataclass(frozen=True)
@@ -50,7 +56,7 @@ def _cents(p):
 
 
 def market_name(t):
-    name = t["asset"].upper() if t["asset"] != "gold" else "Gold"
+    name = NAMES.get(t["asset"], t["asset"].upper())
     return f"{name} {HORIZON.get(t.get('horizon', '15m'), t.get('horizon', ''))}"
 
 
@@ -82,9 +88,15 @@ def bracket_text(t):
     return "\n".join(lines)
 
 
+def model_tag(t):
+    return f" · model {t['model']}" if t.get("model") else ""
+
+
 def result_label(t):
     if t.get("exit_reason") == "take_profit":
         return "💸 OUT", "sold early above fair value"
+    if t.get("exit_reason") == "pre_news":
+        return "📰 OUT BEFORE NEWS", "sold ahead of a high-impact release, at or above the entry price"
     if t.get("exit_reason") == "target":
         leg = (t.get("exits") or [{}])[-1]
         return "🎯 TAKE PROFIT", f"take-profit hit · sold at {_cents(leg.get('price', 0))}"
@@ -92,19 +104,19 @@ def result_label(t):
         leg = (t.get("exits") or [{}])[-1]
         return "🛑 STOPPED", f"stop-loss hit · sold at {_cents(leg.get('price', 0))}"
     if t.get("outcome") == t.get("side"):
-        return "✅ WIN", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
-    return "❌ LOSS", f"settled **{t.get('outcome')}** at {_money(t.get('settlement_price') or 0)}"
+        return "✅ WIN", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
+    return "❌ LOSS", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
 
 
 def updown_trade_card(t, desk: Desk = CRYPTO):
     side = SIDE.get(t["side"], t["side"])
     window = (f"{market_name(t)} window {_time(t['window_start'])}–{_time(t['window_end'])} · "
-              f"price to beat {_money(t['price_to_beat'])}")
+              f"price to beat {_price(t, t['price_to_beat'])}")
     if t.get("status") == "CLOSED":
         label, how = result_label(t)
         if t.get("exits") and t["exits"][-1]["kind"] == "settlement" and len(t["exits"]) > 1:
             how += f" (part sold early first)"
-        card = {"title": f"{label} · {market_name(t)} {side} · {_money(t['net_pnl'])}",
+        card = {"title": f"{label} · {market_name(t)} {side} · {_money(t['net_pnl'])}{model_tag(t)}",
                 "description": f"{window}\n{how} · balance {_money(t.get('balance_after', 0))}",
                 "fields": [("Bet", f"{t['quantity']} × {_cents(t['entry_price'])} · stake {_money(t['cost'])} · "
                                    f"back {_money(t.get('proceeds', 0))}")], "footer": desk.footer}
@@ -114,14 +126,14 @@ def updown_trade_card(t, desk: Desk = CRYPTO):
         return card
     cross = (f"Coinbase {t.get('coinbase_product') or ''} {_money(t['coinbase_price'])}"
              if t.get("coinbase_price") else "Coinbase —")
-    return {"title": f"{desk.emoji} PICK · {market_name(t)} {side} (paper)",
+    return {"title": f"{desk.emoji} PICK · {market_name(t)} {side} (paper){model_tag(t)}",
             "description": window, "footer": desk.footer, "fields": [
                 ("Entry", f"{t['quantity']} contracts at **{_cents(t['entry_price'])}** + {_money(t['entry_fee'])} fee"),
                 ("Model vs market", f"Model gives {t['side'].title()} **{t['fair_side']:.0%}** · market charged "
                                     f"{_cents(t['entry_price'])} · edge {t['edge'] * 100:.1f}¢ per contract after fees"),
                 ("⚠️ Risk", risk_text(t)),
                 *([("🎯 Take profit / 🛑 Stop loss", bracket_text(t))] if bracket_text(t) else []),
-                ("Prices used", f"Settlement index {_money(t.get('index_price') or 0)} · {cross} · "
+                ("Prices used", f"Settlement index {_price(t, t.get('index_price'))} · {cross} · "
                                 f"{t.get('seconds_left', 0) / 60:.1f} min left")]}
 
 

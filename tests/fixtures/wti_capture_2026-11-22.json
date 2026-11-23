@@ -1,0 +1,19 @@
+{
+  "_note": "Trimmed from live Polymarket US responses (read-only GETs) captured 2026-11-22 ~20:20 AZ.",
+  "event_15m": {"events": [{"slug": "wti-updown-15m-2026-11-23-0300z", "title": "WTI Crude Up or Down 15m", "markets": [{
+    "slug": "cpwtif-wti-updown-15m-2026-11-23-0300z", "status": "MARKET_STATUS_RESOLVED", "feeCoefficient": 0.095,
+    "orderPriceMinTickSize": 0.01, "minimumTradeQty": 0.01,
+    "description": "This market will settle to Up if the price of WTI crude oil futures at 10:15PM ET on Nov 22, 2026 is greater than or equal to the price of WTI crude oil futures at 10:00PM ET on Nov 22, 2026. Otherwise, this market will settle to Down. Outcome sourced from Chainlink. The price of WTI crude oil futures used for settlement is the mid price published in the Chainlink US Oil futures mid price data stream (NY-USOIL/USD-Streams-FuturesPrice), rounded to the nearest cent (0.005 rounds up to 0.01). Chainlink calculates this mid price from bid and ask quotes for the front-month WTI crude oil futures contract. Chainlink determines which contract month the stream follows and when it moves to the next one, and the published price is used without adjusting for that change.",
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "wti"},
+      "indexSymbol": "", "horizon": "15m", "windowStart": "2026-11-23T03:00:00Z", "windowEnd": "2026-11-23T03:15:00Z",
+      "priceToBeat": {"value": "83.00", "currency": "USD"}, "settlementPrice": {"value": "83.19", "currency": "USD"},
+      "priceDecimals": 2, "assetName": "WTI", "priceUnit": "bbl", "nextWindowStart": "2026-11-23T03:15:00Z"}}]}]},
+  "event_1d": {"events": [{"slug": "wti-updown-1d-2026-11-22-2315z", "title": "WTI Crude Up or Down Daily", "markets": [{
+    "slug": "cpwtif-wti-updown-1d-2026-11-22-2315z", "status": "MARKET_STATUS_OPEN", "feeCoefficient": 0.095,
+    "assetPriceTerms": {"marketType": "ASSET_PRICE_MARKET_TYPE_UP_DOWN", "asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "wti"},
+      "horizon": "1d", "windowStart": "2026-11-22T23:15:00Z", "windowEnd": "2026-11-23T22:00:00Z",
+      "priceToBeat": {"value": "82.97", "currency": "USD"}, "settlementPrice": null, "assetName": "WTI", "priceUnit": "bbl",
+      "nextWindowStart": "2026-11-23T23:15:00Z"}}]}]},
+  "index_1m_tail": {"series": [{"asset": {"assetClass": "ASSET_CLASS_COMMODITY", "symbol": "wti"}, "candles": [
+    {"timestamp": 1795403700, "open": "83.19", "high": "83.25", "low": "83.19", "close": "83.25", "tickCount": 28}]}]}
+}

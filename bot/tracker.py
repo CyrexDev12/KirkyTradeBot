@@ -224,7 +224,11 @@ class ChiefPublisher:
                 self.store.set_report(g, slot)
 
 
-BOTS = [("nfl", "🏈 NFL Polymarket"), ("btc", "₿ BTC spot"), ("updown", "🎲 Crypto Up/Down"), ("gold", "🥇 Gold Up/Down")]
+BOTS = [("nfl", "🏈 NFL Polymarket"), ("btc", "₿ BTC spot"), ("updown", "🎲 Crypto Up/Down"), ("gold", "🥇 Gold Up/Down"),
+        ("oil-A", "🛢️ Oil A · Random walk"), ("oil-B", "🛢️ Oil B · Fast volatility"),
+        ("oil-C", "🛢️ Oil C · Trend follower"), ("oil-D", "🛢️ Oil D · Market blend"), ("oil-E", "🛢️ Oil E · News-aware"),
+        ("gas-A", "🔥 Gas A · Random walk"), ("gas-B", "🔥 Gas B · Fast volatility"),
+        ("gas-C", "🔥 Gas C · Trend follower"), ("gas-D", "🔥 Gas D · Market blend"), ("gas-E", "🔥 Gas E · News-aware")]
 
 
 def bot_card(status, trades, desk_id):
