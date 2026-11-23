@@ -17,8 +17,9 @@ class PredictionAPI:
         self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30)
         self.token = token if token is not None else operator_token()
 
-    async def get(self, path, **params):
-        response = await self.client.get(path, params={k: v for k, v in params.items() if v is not None})
+    async def get(self, path, *, timeout=30, **params):
+        response = await self.client.get(path, timeout=timeout,
+                                         params={k: v for k, v in params.items() if v is not None})
         response.raise_for_status()
         return response.json()
 
@@ -43,8 +44,15 @@ class PredictionAPI:
     async def gold(self, path, **params):
         return await self.get("/api/gold" + path, **params)
 
-    async def tracker(self, path, **params):
-        return await self.get("/api/tracker" + path, **params)
+    async def player_projection(self, player, stat, *, team=None, season=None, week=None):
+        return await self.get("/api/players/projection", player=player, stat=stat, team=team,
+                              season=season, week=week, timeout=90)
+
+    async def player_picks(self):
+        return await self.get("/api/players/picks", timeout=120)
+
+    async def team_points(self, team, *, season=None):
+        return await self.get("/api/graphs/team-points", team=team, season=season)
 
     def _operator_headers(self):
         if not self.token:

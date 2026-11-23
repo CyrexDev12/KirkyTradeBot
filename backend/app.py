@@ -7,7 +7,6 @@ from typing import Literal
 import asyncio
 import json
 import logging
-import time
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -19,13 +18,22 @@ from .mc_archive import get_forecasts
 from .mc_validation import metrics as mc_metrics
 from .mc_value import market_values
 from .forecast_feed import game_forecast, upcoming
-from .model import PREDICTIONS, get_metrics, get_predictions, train
+from .model import get_metrics, get_predictions, needs_refresh as winner_needs_refresh, train
 from .trading.api import router as paper_router
 from .crypto.api import router as crypto_router
 from .updown.api import router as updown_router
 from .gold.api import router as gold_router
 from .tracker.api import router as tracker_router
-from .totals import PREDICTIONS as TOTAL_PREDICTIONS, VERSION as TOTAL_VERSION, get_metrics as get_total_metrics, get_predictions as get_total_predictions, over_probability, train as train_totals
+from .player_api import router as player_router
+from .team_graph import router as team_graph_router
+from .totals import (
+    VERSION as TOTAL_VERSION,
+    get_metrics as get_total_metrics,
+    get_predictions as get_total_predictions,
+    needs_refresh as totals_needs_refresh,
+    over_probability,
+    train as train_totals,
+)
 
 app = FastAPI(title="NFL Fair Value", version="1.0.0")
 STATIC = Path(__file__).resolve().parents[1] / "frontend"
@@ -34,6 +42,8 @@ app.include_router(paper_router)
 app.include_router(crypto_router)
 app.include_router(updown_router)
 app.include_router(gold_router)
+app.include_router(player_router)
+app.include_router(team_graph_router)
 app.include_router(tracker_router)
 logger = logging.getLogger(__name__)
 _refresh_task = None
@@ -61,9 +71,9 @@ async def _refresh_mc_loop():
 async def _refresh_model_loop():
     while True:
         try:
-            if not PREDICTIONS.exists() or time.time()-PREDICTIONS.stat().st_mtime > 6*3600:
+            if winner_needs_refresh():
                 await asyncio.to_thread(train)
-            if not TOTAL_PREDICTIONS.exists() or time.time()-TOTAL_PREDICTIONS.stat().st_mtime > 6*3600:
+            if totals_needs_refresh():
                 await asyncio.to_thread(train_totals)
         except Exception:
             logger.exception("NFL model refresh failed; existing artifacts remain available")

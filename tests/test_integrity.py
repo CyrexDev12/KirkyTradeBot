@@ -1,10 +1,13 @@
 from copy import deepcopy
+import json
 
+import numpy as np
 import polars as pl
 import pytest
 
 from backend.data import build_features
 from backend.markets import execution, match_event, match_total_markets, valuation
+from backend import model, totals
 
 
 def test_current_game_play_by_play_cannot_enter_its_pregame_features():
@@ -19,6 +22,47 @@ def test_current_game_play_by_play_cannot_enter_its_pregame_features():
     altered_scores = deepcopy(games)
     altered_scores[1]["home_score"] = 99
     assert build_features(games, base)[1]["total_features"] == build_features(altered_scores, base)[1]["total_features"]
+
+
+def test_isolated_score_and_efficiency_spikes_are_bounded_in_future_features():
+    games, stats = [], []
+    scores = [18, 20, 22, 23, 25, 20, 21, 180, 22]
+    for i, score in enumerate(scores):
+        games.append(dict(game_id=str(i), season=2025, week=i + 1, kickoff=f"2025-09-{i + 1:02d}T18:00:00+00:00",
+                          home="BUF", away="MIA", home_score=score, away_score=21, home_rest=7, away_rest=7))
+        stats.append(dict(game_id=str(i), team="BUF", off_epa=4.0 if i == 7 else .12))
+    baseline_games = [*games[:7], {**games[7], "home_score": 70}, games[8]]
+    baseline_stats = [*stats[:7], {**stats[7], "off_epa": .60}, stats[8]]
+    baseline_rows = build_features(baseline_games, pl.DataFrame(baseline_stats))
+    rows = build_features(games, pl.DataFrame(stats))
+    assert rows[7]["home_score"] == 180
+    assert rows[7]["features"] == baseline_rows[7]["features"]
+    assert rows[8]["total_features"] == baseline_rows[8]["total_features"]
+    assert rows[8]["features"] == baseline_rows[8]["features"]
+    assert rows[8]["total_features"]["home_points_for"] < 25
+
+
+@pytest.mark.parametrize("module, key, new_value", [(model, "home_probability", .61), (totals, "predicted_total", 42.0)])
+def test_robust_model_upgrade_keeps_only_started_pregame_snapshots(module, key, new_value, tmp_path, monkeypatch):
+    rows = [dict(game_id="played", kickoff="2001-09-09T18:00:00+00:00", home_score=30, away_score=25, season=2001),
+            dict(game_id="upcoming", kickoff="2099-09-13T18:00:00+00:00", home_score=None, away_score=None, season=2099)]
+    old = {gid: {"kind": "live_pregame", key: .8 if module is model else 64.0, "model_version": "legacy"}
+           for gid in ("played", "upcoming")}
+    for name in ("LEGACY_PREDICTIONS", "PREDICTIONS", "METRICS", "ARTIFACT", "RESIDUALS"):
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, tmp_path / f"{name}.json")
+    module.LEGACY_PREDICTIONS.write_text(json.dumps(old))
+    # A retry after rollback can contain a reconstruction in the new artifact
+    # and a pregame snapshot in the previous release's artifact for the same game.
+    module.PREDICTIONS.write_text(json.dumps({"played": {"kind": "walk_forward_reconstruction", key: new_value}}))
+    monkeypatch.setattr(module, "load_feature_rows", lambda **_: rows)
+    monkeypatch.setattr(module, "_fit", lambda _: "fitted")
+    monkeypatch.setattr(module, "_predict", lambda _, examples: np.full(len(examples), new_value))
+    module.train()
+    predictions = module.get_predictions()
+    assert predictions["played"] == old["played"]
+    assert predictions["upcoming"][key] == new_value
+    assert json.loads(module.LEGACY_PREDICTIONS.read_text()) == old
 
 
 def test_strict_market_matching_and_rejects_props():

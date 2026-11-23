@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from .common import utc
 from .config import StrategyConfig
-from .inputs import TRADING_DIR
+from .inputs import uncertainty_profiles_current
 from .reports import CODE_TEXT, performance, trade_card
 from .store import Store
 from .worker import DB_PATH, HEALTH_PATH, trade_status
@@ -111,7 +111,7 @@ def why_no_trades():
                  "validation": None if not validation else {"passed": bool(validation["passed"]),
                                                             "created_at": validation["created_at"],
                                                             "reasons": validation["payload"].get("reasons")},
-                 "uncertainty_profiles": (TRADING_DIR / "uncertainty_profiles.json").exists()}
+                 "uncertainty_profiles": uncertainty_profiles_current()}
     if not plan:
         return {"plan": None, "readiness": readiness}
     decisions = plan["payload"]["decisions"]

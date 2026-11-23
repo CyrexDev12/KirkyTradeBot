@@ -122,7 +122,7 @@ echo 'Building the new images while the existing services remain online...'
 echo 'Checking imports as the container app user before stopping live services...'
 for service in backend bot paper-worker; do
     if [[ "$service" == bot ]]; then
-        imports='import bot.discord_bot; import bot.paper'
+        imports='import bot.discord_bot; import bot.paper; import bot.player_stats; from matplotlib.backends.backend_agg import FigureCanvasAgg; from matplotlib.figure import Figure; FigureCanvasAgg(Figure()).draw()'
     elif [[ "$service" == backend ]]; then
         # All three market workers use this same backend image.
         imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker'
@@ -157,19 +157,20 @@ done
 "${compose[@]}" up -d --no-build --force-recreate --wait --wait-timeout 900 backend bot crypto-worker updown-worker gold-worker
 
 # Prepare profiles before the first worker plan can freeze an uncalibrated slate.
-if ! "${compose[@]}" exec -T backend test -s /data/trading/uncertainty_profiles.json; then
+if ! "${compose[@]}" exec -T backend python -c 'from backend.trading.inputs import uncertainty_profiles_current; raise SystemExit(not uncertainty_profiles_current())'; then
     echo 'Preparing paper-model uncertainty profiles. The API and Discord bot are online during this step.'
-    "${compose[@]}" exec -T backend python -c 'import time; from backend.model import get_metrics
+    "${compose[@]}" exec -T backend python -c 'import time; from backend.model import MODEL_VERSION, get_metrics
 for attempt in range(90):
     try:
-        if get_metrics().get("calibration"): break
+        metrics = get_metrics()
+        if metrics.get("model_version") == MODEL_VERSION and metrics.get("calibration"): break
     except RuntimeError: pass
-    if attempt % 6 == 0: print("Waiting for existing-model calibration...", flush=True)
+    if attempt % 6 == 0: print("Waiting for current gradient model calibration...", flush=True)
     time.sleep(10)
 else: raise SystemExit("Model calibration is not ready; inspect backend logs and retry the update.")'
     "${compose[@]}" exec -T backend python -m backend.trading.cli uncertainty --mc-seasons 2024,2025,2026
 fi
-"${compose[@]}" exec -T backend python -c 'from backend.trading.inputs import load_uncertainty; p=load_uncertainty(); assert ("GB","moneyline") in p and ("MC","moneyline") in p, "Required uncertainty profiles missing"'
+"${compose[@]}" exec -T backend python -c 'from backend.trading.inputs import load_uncertainty, uncertainty_profiles_current; p=load_uncertainty(); assert uncertainty_profiles_current() and ("GB","moneyline") in p and ("MC","moneyline") in p, "Required current uncertainty profiles missing"'
 "${compose[@]}" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 900 paper-worker
 "${compose[@]}" exec -T bot python -c 'import asyncio; from bot.api import PredictionAPI
 async def check():
@@ -184,7 +185,8 @@ curl -fsS http://127.0.0.1:8000/api/crypto/stats > /dev/null
 curl -fsS http://127.0.0.1:8000/api/updown/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/gold/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/paper/parlay > /dev/null
+"${compose[@]}" exec -T backend python -c 'import json, urllib.request; paths = json.load(urllib.request.urlopen("http://127.0.0.1:8000/openapi.json", timeout=10))["paths"]; assert {"/api/players/projection", "/api/players/picks", "/api/graphs/team-points"} <= paths.keys()'
 "${compose[@]}" ps
 curl -fsS http://127.0.0.1:8000/healthz
 printf '\nUpdate complete. Backup: %s\n' "$backup"
-echo 'In Discord, use /paper-channels setup to choose the BTC and parlay channels. Check /parlay and /crypto-stats.'
+echo 'In Discord, try /player-stats and /pygraph, and use /paper-channels set to choose the player picks channel.'

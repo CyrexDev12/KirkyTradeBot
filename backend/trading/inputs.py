@@ -11,15 +11,26 @@ import json
 import logging
 from pathlib import Path
 
-from ..data import DATA, schedule_rows, schedules
+from ..data import DATA, MODEL_VERSION, schedule_rows, schedules
 from ..markets import match_event, match_total_markets
-from ..monte_carlo import total_probabilities
+from ..monte_carlo import VERSION as MC_VERSION, total_probabilities
 from .common import D, utc
 from .valuation import UncertaintyProfile, tie_estimate_from_games
 
 logger = logging.getLogger(__name__)
 TRADING_DIR = DATA / "trading"
-UNCERTAINTY_PATH = TRADING_DIR / "uncertainty_profiles.json"
+UNCERTAINTY_MODEL_VERSIONS = {"GB": MODEL_VERSION, "MC": MC_VERSION}
+UNCERTAINTY_PATH = TRADING_DIR / f"uncertainty_profiles_{MODEL_VERSION}_{MC_VERSION}.json"
+
+
+def uncertainty_profiles_current(path: Path = UNCERTAINTY_PATH) -> bool:
+    try:
+        payload = json.loads(path.read_text())
+        available = {(item.get("provider"), item.get("market_type")) for item in payload.get("profiles", [])}
+        return (payload.get("model_versions") == UNCERTAINTY_MODEL_VERSIONS
+                and {("GB", "moneyline"), ("MC", "moneyline")} <= available)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def load_uncertainty(path: Path = UNCERTAINTY_PATH) -> dict:

@@ -11,8 +11,10 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from .robust import median_scale, point_history, winsorize
+
 MODEL_ID = "current_season_monte_carlo"
-VERSION = "paired-scores-v1.0"
+VERSION = "paired-scores-v1.1-robust"
 EASTERN = ZoneInfo("America/New_York")
 TARGET_FIELDS = ("game_id", "season", "week", "game_type", "home", "away", "kickoff", "neutral_site")
 
@@ -129,9 +131,22 @@ class Ratings:
                 y[row] = g[own + "_score"]
         # With a free intercept and equal positive team penalties, translating either
         # family into the intercept strictly reduces its penalty unless its mean is zero.
-        wx = x.T * self.weights.repeat(2)
+        base_weights = self.weights.repeat(2)
         penalty = np.diag([0, cfg.home_ridge] + [cfg.team_ridge] * (2 * n))
-        self.coef = np.linalg.solve(wx @ x + penalty, wx @ y)
+        wx = x.T * base_weights
+        self.coef = np.linalg.solve(wx @ x + penalty, wx @ point_history(y))
+        # Huber ridge leaves ordinary errors at their time weight and steadily
+        # discounts larger score errors. The targets still contain the real finals.
+        _, scale = median_scale(y - x @ self.coef, min_scale=8.0)
+        threshold = 1.75 * scale
+        for _ in range(15):
+            influence = 1 / np.maximum(1, np.abs(y - x @ self.coef) / threshold)
+            wx = x.T * (base_weights * influence)
+            updated = np.linalg.solve(wx @ x + penalty, wx @ y)
+            converged = np.allclose(self.coef, updated, atol=1e-5, rtol=1e-5)
+            self.coef = updated
+            if converged:
+                break
         if not np.isfinite(self.coef).all():
             raise ValueError("Nonfinite fitted coefficients")
         self.counts = {team: sum(team in (g["home"], g["away"]) for g in games) for team in self.teams}
@@ -157,8 +172,11 @@ class Ratings:
                 used[g["game_id"]] = float(w)
         w = np.array(list(used.values()))
         offense, defense = self.effects(team)
+        robust_for, robust_allowed = point_history(pf), point_history(pa)
         return dict(games=len(w), effective_n=effective_n(w), points_for=np.mean(pf), points_allowed=np.mean(pa),
-                    weighted_for=np.average(pf, weights=w), weighted_allowed=np.average(pa, weights=w),
+                    weighted_for=np.average(robust_for, weights=w), weighted_allowed=np.average(robust_allowed, weights=w),
+                    adjusted_scoring_games=int(np.count_nonzero(robust_for != pf)),
+                    adjusted_defensive_games=int(np.count_nonzero(robust_allowed != pa)),
                     scoring_strength=offense, score_prevention=defense, game_weights=used)
 
 
@@ -244,7 +262,11 @@ def distribution(values, counts):
 
 def simulate(means, errors, weights, neutral, n, seed):
     p = weights / weights.sum()
-    errors = errors - np.average(errors, axis=0, weights=p)
+    errors = np.asarray(errors, dtype=float)
+    # Winsorize rare tails before recentering, keeping each home/away pair together.
+    bounded = np.column_stack([winsorize(side, min_scale=8.0, threshold=3.5) for side in errors.T])
+    adjusted_pairs = int(np.count_nonzero(np.any(bounded != errors, axis=1)))
+    errors = bounded - np.average(bounded, axis=0, weights=p)
     if neutral:
         errors = np.concatenate((errors, errors[:, ::-1]))
         p = np.tile(p / 2, 2)
@@ -271,6 +293,7 @@ def simulate(means, errors, weights, neutral, n, seed):
     return dict(distributions=dist, paired_score_counts=joint, probability_home_win=probs[0], probability_away_win=probs[1],
                 probability_tie=probs[2], home_win_given_no_tie=probs[0]/(1-probs[2]) if probs[2]<1 else None,
                 diagnostics=dict(clipped_draw_rate=clip_rate, mean_shifts=shifts, exact_outcome_probabilities=exact,
+                                 adjusted_residual_pairs=adjusted_pairs,
                                  max_sampling_difference=max(abs(x-y) for x,y in zip(probs, exact))),
                 quality_flags=flags)
 

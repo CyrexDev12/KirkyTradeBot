@@ -14,12 +14,14 @@ import nflreadpy as nfl
 import numpy as np
 import polars as pl
 
+from .robust import point_history, winsorize
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.getenv("NFL_DATA_DIR", ROOT / "data"))
 DATA.mkdir(parents=True, exist_ok=True)
 START_SEASON = int(os.getenv("NFL_START_SEASON", "2015"))
-MODEL_VERSION = "epa-elo-hgb-v2"
-FEATURE_PATH = DATA / "features_totals_v1.json"
+MODEL_VERSION = "epa-elo-hgb-v3-robust"
+FEATURE_PATH = DATA / "features_totals_v2.json"
 
 TEAMS = {
     "ARI": ("Arizona Cardinals", "#97233F", "ari"), "ATL": ("Atlanta Falcons", "#A71930", "atl"),
@@ -42,6 +44,7 @@ TEAMS = {
 ALIASES = {"STL": "LA", "SD": "LAC", "OAK": "LV", "JAC": "JAX", "WSH": "WAS", "LAR": "LA"}
 
 METRICS = ["off_epa", "off_success", "pass_epa", "rush_epa", "explosive", "def_epa", "def_success", "def_pass_epa", "def_rush_epa", "def_explosive", "qb_epa", "cpoe"]
+RATE_METRICS = {"off_success", "explosive", "def_success", "def_explosive"}
 FEATURES = ["elo_diff", "home_rest_diff", "home_win_pct_diff", "recent_win_pct_diff", "sos_diff", "off_epa_diff", "def_epa_diff", "off_success_diff", "def_success_diff", "pass_epa_diff", "rush_epa_diff", "def_pass_epa_diff", "def_rush_epa_diff", "explosive_diff", "def_explosive_diff", "qb_epa_diff", "cpoe_diff", "recent_off_epa_diff", "recent_def_epa_diff", "experience_min"]
 TOTAL_FEATURES = ["season", "week", "home_rest", "away_rest", "home_off_epa", "away_off_epa", "home_def_epa", "away_def_epa", "home_pass_epa", "away_pass_epa", "home_def_pass_epa", "away_def_pass_epa", "home_off_success", "away_off_success", "home_explosive", "away_explosive", "home_qb_epa", "away_qb_epa", "home_points_for", "away_points_for", "home_points_against", "away_points_against", "home_recent_points_for", "away_recent_points_for", "home_recent_points_against", "away_recent_points_against", "home_plays", "away_plays", "home_games", "away_games"]
 
@@ -59,6 +62,21 @@ def team_info(abbr: str) -> dict:
 
 def _fresh(path: Path, max_age_hours: int) -> bool:
     return path.exists() and (datetime.now(timezone.utc).timestamp() - path.stat().st_mtime < max_age_hours * 3600)
+
+
+def frozen_pregame_predictions(rows: list[dict], *paths: Path) -> dict:
+    """Carry recorded pregame forecasts for started games into a rebuilt artifact."""
+    now = datetime.now(timezone.utc)
+    started = {row["game_id"] for row in rows if datetime.fromisoformat(row["kickoff"]) <= now}
+    frozen = {}
+    for path in paths:
+        if path.exists():
+            for game_id, forecast in json.loads(path.read_text()).items():
+                if game_id in started and forecast.get("kind") == "live_pregame":
+                    previous = frozen.get(game_id, {})
+                    if (forecast.get("generated_at") or "") >= (previous.get("generated_at") or ""):
+                        frozen[game_id] = forecast
+    return frozen
 
 
 _schedule_lock = Lock()
@@ -154,17 +172,28 @@ def schedule_rows(df: pl.DataFrame) -> list[dict]:
 
 
 def _mean(games: list[dict], metric: str, season: int, recent: bool = False) -> float:
-    if not games:
-        return 0.0
-    selected = games[-6:] if recent else games[-24:]
+    selected = games[-24:]
     values, weights = [], []
-    for g in selected:
+    recent_start = 0
+    for i, g in enumerate(selected):
         x = g.get(metric)
         if x is None or not math.isfinite(float(x)):
             continue
         values.append(float(x))
         weights.append(1.0 if g["season"] == season else 0.35)
-    return float(np.average(values, weights=weights)) if values else 0.0
+        if i < len(selected) - 6:
+            recent_start += 1
+    # Use the longer prior window to estimate fences even for recent form.
+    if metric in {"points_for", "points_against"}:
+        values = point_history(values)
+    elif metric in RATE_METRICS:
+        values = winsorize(values, min_scale=0.04, threshold=4.0, lower=0, upper=1)
+    elif metric == "plays":
+        values = winsorize(values, min_scale=8.0, lower=0)
+    elif metric in METRICS:
+        values = winsorize(values, min_scale=3.0 if metric == "cpoe" else 0.10, threshold=4.0)
+    start = recent_start if recent else 0
+    return float(np.average(values[start:], weights=weights[start:])) if start < len(values) else 0.0
 
 
 def build_features(rows: list[dict], team_games: pl.DataFrame) -> list[dict]:
@@ -221,7 +250,8 @@ def build_features(rows: list[dict], team_games: pl.DataFrame) -> list[dict]:
         margin = game["home_score"] - game["away_score"]
         hwin = 1.0 if margin > 0 else (0.5 if margin == 0 else 0.0)
         expectation = 1 / (1 + 10 ** ((elo[away] - elo[home] - 55) / 400))
-        update = 22 * math.log1p(abs(margin)) / math.log(15) * (hwin - expectation)
+        # Preserve the result but limit how much a blowout can move Elo in one game.
+        update = 22 * math.log1p(min(abs(margin), 42)) / math.log(15) * (hwin - expectation)
         pre_home, pre_away = elo[home], elo[away]
         elo[home] += update
         elo[away] -= update

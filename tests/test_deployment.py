@@ -87,7 +87,7 @@ elif args[0] == 'compose':
     elif action == 'build' and failure == 'build': sys.exit(17)
     elif action == 'up' and failure == 'activation' and not rollback: sys.exit(19)
     elif action == 'exec':
-        if 'test' in options:
+        if 'raise SystemExit(not uncertainty_profiles_current())' in options[-1]:
             sys.exit(1 if failure in ('profiles', 'missing-profiles') else 0)
         if 'backend.trading.cli' in options and failure == 'profiles': sys.exit(21)
         if 'bot' in options:
@@ -162,6 +162,8 @@ def test_vm_update_preserves_secrets_and_recovers_on_failure(tmp_path, failure):
         assert (app / 'backend/trading/worker.py').exists()
         assert (app / 'backend/crypto/worker.py').exists()
         assert any('up' in call and 'crypto-worker' in call and '--wait' in call for call in calls)
+        assert any('/api/players/projection' in call[-1] and '/api/graphs/team-points' in call[-1]
+                   for call in calls if call[0] == 'compose' and 'exec' in call)
         assert 'Update complete.' in result.stdout
     if failure in ('build', 'imports'):
         assert not any('stop' in call for call in calls)

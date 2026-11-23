@@ -22,10 +22,10 @@ from discord import app_commands
 from .messages import timestamp
 
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "players")
 MARKER = "pub "
 ROUTE_NAMES = {"crypto": "₿ BTC + crypto Up/Down paper trades", "gold": "🥇 Gold Up/Down paper picks",
-               "parlay": "🏈 Weekly NFL parlays",
+               "parlay": "🏈 Weekly NFL parlays", "players": "NFL player yardage picks",
                "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
 
@@ -72,7 +72,8 @@ class PaperPosts:
 
     def configured_nfl_routes(self):
         with closing(self.connect()) as db:
-            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels WHERE kind NOT IN ('crypto','gold')")]
+            return [r["kind"] for r in db.execute("SELECT DISTINCT kind FROM paper_channels "
+                                                 "WHERE kind IN ('picks','updates','reports','parlay')")]
 
     def configure_crypto(self, guild_id, channel_id, latest_event_id, *, parlay_channel_id=None):
         with closing(self.connect()) as db, db:
@@ -398,7 +399,7 @@ def register_paper_commands(bot, posts: PaperPosts):
         await api.paper_operator("/resume", {"actor": str(interaction.user.id)})
         await reply(interaction, "New paper entries resumed.")
 
-    group = app_commands.Group(name="paper-channels", description="Choose where NFL and BTC updates are posted",
+    group = app_commands.Group(name="paper-channels", description="Choose where paper picks and updates are posted",
                                guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
 
     def channel_issue(interaction, channel):
@@ -432,7 +433,7 @@ def register_paper_commands(bot, posts: PaperPosts):
                  for kind, name in ROUTE_NAMES.items()]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @group.command(name="set", description="Choose a channel for NFL picks, updates, reports, the weekly parlay, BTC or gold paper trades")
+    @group.command(name="set", description="Choose a Discord channel for a paper publication")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.choices(kind=[app_commands.Choice(name=k, value=k) for k in KINDS])
     async def set_channel(interaction: discord.Interaction, kind: app_commands.Choice[str], channel: discord.TextChannel):
@@ -455,6 +456,10 @@ def register_paper_commands(bot, posts: PaperPosts):
         if kind.value == "parlay":
             await interaction.response.send_message(f"🏈 Weekly parlay boards will post in {channel.mention}. "
                                                     "See the latest with /parlay.", ephemeral=True)
+            return
+        if kind.value == "players":
+            await interaction.response.send_message(f"Weekly player yardage picks will post in {channel.mention}. "
+                                                    "Use /player-stats to check a forecast.", ephemeral=True)
             return
         await interaction.response.send_message(f"Paper {kind.value} will post in {channel.mention}.", ephemeral=True)
 

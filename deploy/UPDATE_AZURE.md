@@ -2,7 +2,7 @@
 
 The existing VM is `nfl-fair-value` in resource group `nfl-fair-value-rg`, subscription `25328a62-e79b-4f1e-aaf3-d94e1554430b`, region **Mexico Central**. Update it with `update.sh`. The updater discovers its actual region and size and does not deploy the Bicep template or replace the VM.
 
-This release includes the NFL dashboard and parlay board, the BTC paper desk, and the crypto and Gold Up/Down paper workers. The Up/Down and Gold desks use separate simulated accounts and place no real orders. The parlay board continues to use your configured parlay channel.
+This release updates the team scoring models to reduce the effect of extreme games. It adds QB/RB yardage forecasts, a weekly player picks board, and PNG and CSV graphs in Discord. All six services continue to run on the existing VM.
 
 On an existing five-ticket board, the first two tickets stay in their slots. The next scan can replace the other two-leg tickets with qualifying longer tickets while every game on the original is still pregame. The post identifies that revision and the API retains the superseded tickets. Once a ticket has started, its picks and prices are frozen.
 
@@ -51,11 +51,11 @@ You do not need to enter or reset the Discord token. The updater reads the exist
 ## What happens during the update
 
 - The source archive includes a SHA-256 manifest and LF endings for shell scripts. After extraction, source directories receive mode `0755` so the container's nonroot user can read nested packages. Private staging directories and secrets keep their restricted permissions. It excludes local credentials, cached data, and virtual environments.
-- New images build while the old services remain online. The updater checks imports for the API, Discord bot, paper worker, BTC worker, crypto Up/Down worker, and Gold worker before stopping the running services.
+- New images build while the old services remain online. The updater checks imports for the API, Discord bot, and all workers before stopping the running services. It also verifies that the Discord image can render a graph without a display.
 - The updater stops the old services briefly to create consistent compressed backups of both named volumes, including SQLite journals, paper-account data, predictions, and Discord delivery records. Backup time depends on data size.
 - Application source and containers are replaced while the `.env` file, `.secrets` directory, `nfl-fair-value_predictions` volume, and `nfl-fair-value_bot-state` volume are retained. Existing forecasts, channel settings, alert history, and paper balances are not reset.
-- The backend and bot return first. On the first paper-trading update, the updater builds GB/MC uncertainty profiles from the existing GB calibration and MC seasons 2024, 2025, and 2026 before starting the worker. This step can take several minutes. The worker must not create its first weekly plan before those inputs exist.
-- All six services must become healthy. The updater checks the BTC, Up/Down, Gold, and parlay API routes and verifies the bot can authenticate to the paper operator API.
+- The backend and bot return first. A new model version triggers an immediate gradient model rebuild and versioned paper-model calibration. The updater waits for the current winner calibration and builds current gradient and Monte Carlo uncertainty profiles before starting the paper worker. This step can take several minutes. Prior forecasts and calibration artifacts stay available to the previous release during recovery.
+- All six services must become healthy. The updater verifies bot authentication, the BTC, Up/Down, Gold, and parlay API routes, and registration of the player forecast, weekly picks, and graph endpoints.
 - If activation fails, the updater attempts to restore the old source and saved image versions automatically. It retains live data; it does not roll back Discord delivery history or erase new paper-ledger records. Data backups remain available for manual recovery. Database changes in this release are additive. Future incompatible schema migrations require a separate recovery plan.
 
 Backups are under `~/nfl-backups/<release-id>` on the VM, with private directory permissions. Keep enough free disk space for the new images, a copy of both data volumes, and the previous release. Old images and backups are retained rather than deleted automatically. A backup on the same VM protects an application update; copy it off the VM if you need recovery from disk or VM loss.
@@ -81,6 +81,8 @@ In Discord, run:
 /updown-stats
 /gold-account
 /gold-stats
+/player-stats player:Josh Allen stat:passing
+/pygraph dataset:team-points subject:BUF
 ```
 
 `/account` should show `PAPER_ONLY` and $100 on the first initialization, or the existing paper balance on later updates. `/health` reports the worker timestamp and any market-data errors. Container health confirms running processes; it does not guarantee that every upstream feed or model is ready.
@@ -103,7 +105,10 @@ To change individual destinations, use these commands.
 /paper-channels set kind:parlay channel:#nfl-parlays
 /paper-channels set kind:crypto channel:#btc-paper
 /paper-channels set kind:gold channel:#gold-paper
+/paper-channels set kind:players channel:#player-stats
 ```
+
+The player board checks for picks every 15 minutes when a player channel is configured. It adds up to ten distinct picks from verified lines before kickoff. The first forecast request may take longer while NFLverse player and team data is downloaded and cached. Container health is independent of sports data and quote availability.
 
 The bot needs View Channel, Send Messages, Embed Links, and Read Message History in each selected channel. The existing `/alerts setup` configuration is preserved; rerun it only if you want to change the channel or timing. Use `/why-no-trades` to inspect why a plan has no qualifying paper trades. A lack of picks alone is not a deployment failure.
 

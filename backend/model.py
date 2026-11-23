@@ -10,11 +10,20 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 
-from .data import DATA, FEATURES, MODEL_VERSION, load_feature_rows
+from .data import DATA, FEATURES, MODEL_VERSION, frozen_pregame_predictions, load_feature_rows
 
-PREDICTIONS = DATA / "predictions.json"
-METRICS = DATA / "model_metrics.json"
-ARTIFACT = DATA / "model.pkl"
+LEGACY_PREDICTIONS = DATA / "predictions.json"
+PREDICTIONS = DATA / f"predictions_{MODEL_VERSION}.json"
+METRICS = DATA / f"model_metrics_{MODEL_VERSION}.json"
+ARTIFACT = DATA / f"model_{MODEL_VERSION}.pkl"
+
+
+def needs_refresh() -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        return now - min(path.stat().st_mtime for path in (PREDICTIONS, METRICS, ARTIFACT)) > 6 * 3600
+    except FileNotFoundError:
+        return True
 
 
 def _xy(rows: list[dict]):
@@ -99,13 +108,7 @@ def train(refresh_data: bool = False) -> dict:
             prob = float(_calibrate(raw, calibrator)[0])
             predictions[gid] = {"home_probability": prob, "kind": "live_pregame", "generated_at": now,
                                 "model_version": MODEL_VERSION}
-    # Never replace a previously generated pregame estimate once kickoff passes.
-    if PREDICTIONS.exists():
-        old = json.loads(PREDICTIONS.read_text())
-        for row in rows:
-            if (datetime.fromisoformat(row["kickoff"]) <= datetime.now(timezone.utc)
-                    and row["game_id"] in old and old[row["game_id"]].get("kind") == "live_pregame"):
-                predictions[row["game_id"]] = old[row["game_id"]]
+    predictions.update(frozen_pregame_predictions(rows, LEGACY_PREDICTIONS, PREDICTIONS))
     selected = [r for r in by_season if r["season"] < current]
     validation = {"model_version": MODEL_VERSION, "generated_at": now, "method": "season walk-forward; both the model and probability calibrator use earlier seasons only",
                   "seasons": by_season, "aggregate": None, "calibration": [], "trading_backtest": None,
