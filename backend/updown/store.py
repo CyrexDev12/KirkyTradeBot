@@ -6,6 +6,7 @@ gold 15-minute and hourly windows that start at the same time stay separate.
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
@@ -52,6 +53,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS events(
                     id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL, kind TEXT NOT NULL,
                     at TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(trade_id, kind));
+                CREATE TABLE IF NOT EXISTS execution_depth(
+                    slug TEXT PRIMARY KEY, observed_at REAL NOT NULL, exchange_at REAL,
+                    sequence INTEGER, spent TEXT NOT NULL);
             """)
 
     def connect(self):
@@ -81,6 +85,63 @@ class Store:
                                (local_day(now),)).fetchone()[0]
             return {"balance": self._realized(db), "open_stake": self._open_stake(db), "today_pnl": today}
 
+    # ---- displayed depth ------------------------------------------------
+    @staticmethod
+    def _depth_row(db, slug):
+        return db.execute("SELECT * FROM execution_depth WHERE slug=?", (slug,)).fetchone()
+
+    def execution_book(self, slug, book):
+        """Give matching the unspent depth from a non-regressing observation."""
+        with self.transaction(True) as db:
+            row = self._depth_row(db, slug)
+            exchange_at, sequence = book.exchange_at, book.sequence
+            if row:
+                for name, value in (("observed_at", book.at), ("exchange_at", exchange_at), ("sequence", sequence)):
+                    if value is not None and row[name] is not None and value < row[name]:
+                        return None
+            spent = json.loads(row["spent"]) if row else {"bids": {}, "offers": {}}
+            adjusted = {}
+            for side, levels in (("bids", book.yes_bids), ("offers", book.yes_offers)):
+                # Keep only the spent quantity still visible at this level. Net gains
+                # in displayed depth can then replenish the account's capacity.
+                spent[side] = {str(price): min(qty, spent[side][str(price)]) for price, qty in levels
+                               if str(price) in spent[side]}
+                adjusted[side] = tuple((price, qty - spent[side].get(str(price), 0.0)) for price, qty in levels)
+            db.execute("""INSERT INTO execution_depth(slug,observed_at,exchange_at,sequence,spent)
+                          VALUES(?,?,?,?,?) ON CONFLICT(slug) DO UPDATE SET observed_at=excluded.observed_at,
+                          exchange_at=coalesce(excluded.exchange_at,exchange_at),
+                          sequence=coalesce(excluded.sequence,sequence), spent=excluded.spent""",
+                       (slug, book.at, exchange_at, sequence, json.dumps(spent)))
+        return replace(book, yes_bids=adjusted["bids"], yes_offers=adjusted["offers"])
+
+    def _consume(self, db, slug, book, side, buying, fills, quantity, participation):
+        """Revalidate and spend the levels in the same transaction as the fill."""
+        row = self._depth_row(db, slug)
+        if (not row or row["observed_at"] != book.at or not fills or sum(q for _, q in fills) != quantity
+                or (book.exchange_at is not None and row["exchange_at"] != book.exchange_at)
+                or (book.sequence is not None and row["sequence"] != book.sequence)):
+            return False
+        spent = json.loads(row["spent"])
+        canonical = "offers" if buying == (side == "UP") else "bids"
+        raw = book.yes_offers if canonical == "offers" else book.yes_bids
+        quoted = book.side_asks(side) if buying else book.side_bids(side)
+        physical = {price: (str(yes), depth) for (price, _), (yes, depth) in zip(quoted, raw)}
+        for price, q in fills:
+            if price not in physical:
+                return False
+            key, displayed = physical[price]
+            if q <= 0 or q > int(max(0.0, displayed - spent[canonical].get(key, 0.0)) * participation):
+                return False
+            spent[canonical][key] = displayed
+        db.execute("UPDATE execution_depth SET spent=? WHERE slug=?", (json.dumps(spent), slug))
+        return True
+
+    @staticmethod
+    def _book_evidence(book):
+        return {"book_at": iso(book.at), "book_sequence": book.sequence,
+                "book_requested_at": iso(book.requested_at) if book.requested_at is not None else None,
+                "book_exchange_at": iso(book.exchange_at) if book.exchange_at is not None else None}
+
     # ---- windows / observations ---------------------------------------
     def note_window(self, asset, start, reason, now, price_to_beat=None):
         with self.transaction(True) as db:
@@ -96,20 +157,27 @@ class Store:
                        (asset, start, int((now - start) // 60), values.get("seconds_left"), values.get("index_price"),
                         values.get("coinbase"), values.get("fair_up"), values.get("yes_bid"), values.get("yes_ask")))
 
-    def record_outcome(self, asset, start, price_to_beat, settlement):
-        outcome = "UNKNOWN" if settlement is None else ("UP" if settlement >= price_to_beat else "DOWN")
-        with self.transaction(True) as db:
-            db.execute("""INSERT INTO windows(asset,window_start,price_to_beat,settlement,outcome) VALUES(?,?,?,?,?)
-                          ON CONFLICT(asset,window_start) DO UPDATE SET settlement=excluded.settlement,
-                          outcome=excluded.outcome, price_to_beat=coalesce(price_to_beat, excluded.price_to_beat)""",
-                       (asset, start, price_to_beat, settlement, outcome))
-        return outcome
+    @staticmethod
+    def _record_outcome(db, asset, start, price_to_beat, settlement, outcome):
+        db.execute("""INSERT INTO windows(asset,window_start,price_to_beat,settlement,outcome) VALUES(?,?,?,?,?)
+                      ON CONFLICT(asset,window_start) DO UPDATE SET settlement=excluded.settlement,
+                      outcome=excluded.outcome, price_to_beat=coalesce(excluded.price_to_beat, price_to_beat)""",
+                   (asset, start, price_to_beat, settlement, outcome))
 
-    def unresolved_windows(self, before: int) -> list[tuple[str, int, float | None]]:
+    def record_outcome(self, asset, start, price_to_beat, settlement, *, outcome):
+        with self.transaction(True) as db:
+            self._record_outcome(db, asset, start, price_to_beat, settlement, outcome)
+
+    def unresolved_windows(self, before: dict[str, int]) -> list[tuple[str, int, float]]:
+        # Open positions are checked separately. Calibration needs at least one priced observation.
         with self.transaction() as db:
-            return [(r[0], r[1], r[2]) for r in db.execute(
-                "SELECT asset,window_start,price_to_beat FROM windows WHERE outcome IS NULL AND window_start+300<=?"
-                " ORDER BY window_start LIMIT 20", (before,))]
+            return [(r[0], r[1], r[2]) for asset, until in before.items() for r in db.execute(
+                """SELECT w.asset,w.window_start,w.price_to_beat FROM windows w
+                   LEFT JOIN trades t ON t.asset=w.asset AND t.window_start=w.window_start
+                   WHERE w.asset=? AND w.window_start<=? AND (w.outcome IS NULL OR w.outcome='UNKNOWN')
+                     AND w.price_to_beat IS NOT NULL AND (t.id IS NULL OR t.status!='OPEN')
+                     AND EXISTS(SELECT 1 FROM observations o WHERE o.asset=w.asset
+                         AND o.window_start=w.window_start AND o.fair_up IS NOT NULL)""", (asset, until))]
 
     # ---- trades ---------------------------------------------------------
     @staticmethod
@@ -126,7 +194,7 @@ class Store:
             return [{**json.loads(r["payload"]), "id": r["id"]} for r in
                     db.execute("SELECT id,payload FROM trades WHERE status='OPEN' ORDER BY id")]
 
-    def open(self, window, decision, now, extra=None) -> dict | None:
+    def open(self, window, decision, now, extra=None, *, book=None, participation=0.5) -> dict | None:
         trade = {"mode": "PAPER_ONLY", "status": "OPEN", "asset": window.asset, "key": window.key,
                  "horizon": window.horizon, "market_slug": window.slug,
                  "window_start": iso(window.start), "window_end": iso(window.end), "window_start_ts": window.start,
@@ -141,6 +209,18 @@ class Store:
             if db.execute("SELECT 1 FROM trades WHERE asset=? AND window_start=?", (window.key, window.start)).fetchone():
                 return None
             balance = self._realized(db)
+            if book is not None:
+                stake = self._open_stake(db)
+                today = db.execute("SELECT coalesce(sum(net_pnl),0) FROM trades WHERE status='CLOSED' AND closed_day=?",
+                                   (local_day(now),)).fetchone()[0]
+                s = decision.risk
+                budget = min(balance - stake, balance * s["max_stake_pct"], balance * s["max_open_stake_pct"] - stake)
+                if (not window.start <= book.at <= now < window.end or decision.cost > budget + 1e-9
+                        or today <= -s["daily_loss_limit"] * (balance - today)
+                        or not self._consume(db, window.slug, book, decision.side, True, decision.fills,
+                                             decision.quantity, participation)):
+                    return None
+                trade.update(self._book_evidence(book), entry_fills=decision.fills)
             trade["balance_at_entry"] = round(balance, 6)
             cur = db.execute("INSERT INTO trades(asset,window_start,status,cost,payload) VALUES(?,?,?,?,?)",
                              (window.key, window.start, "OPEN", trade["cost"], json.dumps(trade, allow_nan=False)))
@@ -151,7 +231,7 @@ class Store:
     def _save(self, db, trade):
         db.execute("UPDATE trades SET payload=? WHERE id=?", (json.dumps(trade, allow_nan=False), trade["id"]))
 
-    def partial_exit(self, trade_id, exit_data, now) -> dict:
+    def partial_exit(self, trade_id, exit_data, now, *, book=None, participation=0.5) -> dict | None:
         with self.transaction(True) as db:
             row = db.execute("SELECT payload FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
             if not row:
@@ -160,11 +240,20 @@ class Store:
             take = min(exit_data["quantity"], trade["remaining"])
             if take <= 0:
                 return None
+            if book is not None and (
+                    not trade["window_start_ts"] <= book.at <= now < trade["window_end_ts"]
+                    or not self._consume(db, trade["market_slug"], book, trade["side"], False,
+                                         exit_data.get("fills"), take, participation)):
+                return None
             scale = take / exit_data["quantity"]
             kind = exit_data.get("kind", "take_profit")
             leg = {"kind": kind, "at": iso(now), "quantity": take, "price": round(exit_data["price"], 6),
                    "proceeds": round(exit_data["gross"] * scale, 6), "fee": round(exit_data["fee"] * scale, 6),
                    "fair_side": exit_data["fair_side"]}
+            if book is not None:
+                leg.update(self._book_evidence(book), fills=exit_data["fills"])
+                leg.update({key: exit_data[key] for key in ("signal_at", "order_ready_at", "trigger", "news")
+                            if key in exit_data})
             trade["exits"].append(leg)
             trade["remaining"] -= take
             if trade["remaining"] == 0:
@@ -173,12 +262,12 @@ class Store:
                 self._save(db, trade)
             return trade
 
-    def _close(self, db, trade, now, how, settlement=None, outcome=None):
+    def _close(self, db, trade, now, how, settlement=None, outcome=None, payout_per_contract=None):
         received = sum(x["proceeds"] - x["fee"] for x in trade["exits"])
-        if outcome is not None and trade["remaining"]:
-            payout = float(trade["remaining"]) if outcome == trade["side"] else 0.0
+        if payout_per_contract is not None and trade["remaining"]:
+            payout = trade["remaining"] * payout_per_contract
             trade["exits"].append({"kind": "settlement", "at": iso(now), "quantity": trade["remaining"],
-                                   "price": 1.0 if payout else 0.0, "proceeds": payout, "fee": 0.0})
+                                   "price": payout_per_contract, "proceeds": payout, "fee": 0.0})
             received += payout
             trade["remaining"] = 0
         trade.update({"status": "CLOSED", "closed_at": iso(now), "exit_reason": how, "settlement_price": settlement,
@@ -190,15 +279,26 @@ class Store:
         trade["balance_after"] = round(self._realized(db), 6)
         self._event(db, "closed", trade, now)
 
-    def settle(self, trade_id, settlement, now, source="polymarket") -> dict | None:
+    def settle(self, trade_id, settlement, now, source="polymarket", *, yes_payout=None,
+               official_price_to_beat=None) -> dict | None:
         with self.transaction(True) as db:
             row = db.execute("SELECT payload FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
             if not row:
                 return None
             trade = {**json.loads(row[0]), "id": trade_id}
-            outcome = "UP" if settlement >= trade["price_to_beat"] else "DOWN"
+            if yes_payout is None:
+                yes_payout = float(settlement >= trade["price_to_beat"])
+            if not 0 <= yes_payout <= 1:
+                raise ValueError("invalid official settlement payout")
+            outcome = "UP" if yes_payout == 1 else "DOWN" if yes_payout == 0 else "OFFICIAL_PAYOUT"
+            payout = yes_payout if trade["side"] == "UP" else 1 - yes_payout
+            if official_price_to_beat is not None:
+                trade["official_price_to_beat"] = official_price_to_beat
             trade["settlement_source"] = source
-            self._close(db, trade, now, "settlement", settlement, outcome)
+            self._close(db, trade, now, "settlement", settlement, outcome, payout)
+            self._record_outcome(db, trade["key"], trade["window_start_ts"],
+                                 official_price_to_beat if official_price_to_beat is not None else trade["price_to_beat"],
+                                 settlement, outcome)
             return trade
 
     @staticmethod

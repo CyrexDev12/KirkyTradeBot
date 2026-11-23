@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.updown.feed import event_slug, parse_book, parse_window
+from backend.updown.feed import Settlement, event_slug, parse_book, parse_window
 from backend.updown.strategy import Book, Settings, Window
 from backend.wti.commodity import NATGAS, WTI
 from backend.wti.events import ET, Calendar, Detector, front_month_expiry, ng_last_trade
@@ -66,7 +66,8 @@ class FakeFeed:
 
     async def settlement(self, product, start):
         p = self.settled.get(product.key)
-        return ("MARKET_STATUS_RESOLVED", p) if p else ("MARKET_STATUS_OPEN", None)
+        if p is not None:
+            return Settlement(f"cpngf-{product.key}-{start}", float(p >= 3.2678), 3.2678, p)
 
     async def book(self, slug):
         return Book(((0.44, 300),), ((0.46, 300),), self.clock())
@@ -88,6 +89,8 @@ def test_gas_desk_trades_five_models_and_holds_off_before_storage(tmp_path):
     now = [start + 300.0]
     desk = Desk(FakeFeed(lambda: now[0]), settings, directory=tmp_path, clock=lambda: now[0], commodity=NATGAS)
     asyncio.run(desk.tick())
+    now[0] += 2
+    asyncio.run(desk.tick())
     opened = [t for w in desk.workers.values() for t in w.store.open_trades()]
     assert opened and {t["commodity"] for t in opened} == {"natgas"} and {t["model"] for t in opened} <= set("ABCDE")
     health = desk.health()
@@ -100,20 +103,6 @@ def test_gas_desk_trades_five_models_and_holds_off_before_storage(tmp_path):
     asyncio.run(desk2.tick())
     assert all(w.store.open_trades() == [] for w in desk2.workers.values())
     assert any("Storage Report" in d["reason"] for d in desk2.workers["A"].store.account(later[0])["latest_decisions"])
-
-
-def test_gas_index_fallback_keeps_four_decimals(tmp_path):
-    from backend.updown.store import Store
-    from backend.updown.worker import Worker
-    from backend.updown.strategy import futures_products
-    product = futures_products("natgas", ("15m",), 4)[0]
-
-    class Feed:
-        async def seconds(self, ids, lookback=120):
-            return {"natgas": [(1000, 3.26784), (1001, 3.26791)]}
-
-    worker = Worker(Store(tmp_path / "x.sqlite3"), Feed(), Settings(products=(product,)), clock=lambda: 1100)
-    assert asyncio.run(worker._index_close(product, 1001)) == 3.2679
 
 
 def test_gas_api_discord_and_chief(tmp_path, monkeypatch):

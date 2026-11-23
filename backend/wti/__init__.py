@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 from ..updown.model import taker_fee
+from ..updown.strategy import sell_bids
 from .commodity import COMMODITIES, NATGAS, WTI, Commodity
 
 SETTINGS = WTI.settings()
@@ -81,19 +82,6 @@ class Rules:
         if not upcoming:
             return None
         theta, floor = trade["theta"], trade["entry_price"] + trade["entry_fee"] / max(trade["quantity"], 1)
-        sold, proceeds, fee = 0, 0.0, 0.0
-        for price, displayed in book.side_bids(trade["side"]):
-            if price - taker_fee(price, theta) < floor:
-                break
-            take = min(trade["remaining"] - sold, int(displayed * self.participation))
-            if take <= 0:
-                continue
-            sold += take
-            proceeds += price * take
-            fee += taker_fee(price, theta) * take
-            if sold >= trade["remaining"]:
-                break
-        if sold <= 0:
-            return None
-        return {"kind": "pre_news", "quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee,
-                "fair_side": None, "news": upcoming[0].name}
+        return sell_bids(book.side_bids(trade["side"]), trade["remaining"], theta, self.participation,
+                         lambda price: price - taker_fee(price, theta) >= floor,
+                         kind="pre_news", news=upcoming[0].name)

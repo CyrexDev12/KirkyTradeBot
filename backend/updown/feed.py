@@ -7,6 +7,7 @@ Shapes were checked against live responses on 2026-11-22:
   window START in UTC; ``events[0].markets[0]`` holds ``status``,
   ``feeCoefficient`` and ``assetPriceTerms`` (``windowStart``, ``windowEnd``,
   ``priceToBeat.value``, ``settlementPrice.value`` once resolved).
+* ``GET /v1/markets/{slug}/settlement`` — published payout per YES contract on the resolved market.
 * ``GET /v1/markets/{slug}/book`` — YES (Up) book, bids best-first, offers best-first.
 * ``GET /v1/asset-prices/history?assets=crypto:btc&bucket=ASSET_PRICE_BUCKET_1S&from=..&to=0``
   — ``series[].candles[{timestamp, close, tickCount}]`` with ``timestamp`` = bucket start.
@@ -18,6 +19,7 @@ Shapes were checked against live responses on 2026-11-22:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import time
@@ -27,6 +29,8 @@ import httpx
 from .strategy import Book, Product, Window
 
 COINBASE = "https://api.exchange.coinbase.com/products/{}/ticker"
+FINAL_MARKET_STATUSES = frozenset(("MARKET_STATUS_RESOLVED", "MARKET_STATUS_CANCELED",
+                                  "MARKET_STATUS_CANCELLED", "MARKET_STATUS_VOIDED"))
 
 
 class FeedError(ValueError):
@@ -67,23 +71,80 @@ def parse_window(asset: str, payload: dict, default_theta: float = 0.095, rule: 
 
 def settlement_price(payload: dict) -> tuple[str, float | None]:
     market = payload["events"][0]["markets"][0]
-    return market.get("status", ""), _value(market["assetPriceTerms"].get("settlementPrice"))
+    status = market.get("status", "")
+    if status not in FINAL_MARKET_STATUSES:
+        return status, None
+    price = _value(market["assetPriceTerms"].get("settlementPrice"))
+    return status, price if price is not None and math.isfinite(price) else None
 
 
-def parse_book(payload: dict, at: float) -> Book:
+@dataclass(frozen=True)
+class Settlement:
+    """The exchange's contract payout and optional published underlying prices."""
+
+    slug: str
+    yes_payout: float
+    price_to_beat: float | None
+    price: float | None
+
+    @property
+    def outcome(self):
+        return "UP" if self.yes_payout == 1 else "DOWN" if self.yes_payout == 0 else "OFFICIAL_PAYOUT"
+
+
+def _official_payout(payload, slug):
+    if not isinstance(payload, dict) or payload.get("slug") != slug:
+        raise FeedError("settlement response market does not match")
+    raw = payload.get("settlement")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise FeedError("invalid settlement payout")
+    try:
+        payout = float(raw)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise FeedError("invalid settlement payout") from exc
+    if not 0 <= payout <= 1:
+        raise FeedError("invalid settlement payout")
+    return payout
+
+
+def parse_book(payload: dict, at: float, *, requested_at=None, slug=None) -> Book:
     data = payload.get("marketData") or {}
-    if data.get("state") not in (None, "MARKET_STATE_OPEN"):
+    if data.get("state") != "MARKET_STATE_OPEN":
         raise FeedError(f"book {data.get('state')}")
+    if slug is not None and data.get("marketSlug") not in (None, slug):
+        raise FeedError("book market does not match the order")
 
     def levels(rows, reverse):
         out = []
+        seen = set()
         for row in rows or ():
-            price, qty = float(row["px"]["value"]), float(row["qty"])
-            if 0 < price < 1 and qty > 0:
+            try:
+                price, qty = float(row["px"]["value"]), float(row["qty"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise FeedError("invalid book level") from exc
+            if 0 < price < 1 and math.isfinite(qty) and qty > 0:
+                if price in seen:
+                    raise FeedError("duplicate book price level")
+                seen.add(price)
                 out.append((price, qty))
         return tuple(sorted(out, reverse=reverse))
 
-    return Book(levels(data.get("bids"), True), levels(data.get("offers"), False), at)
+    bids = levels(data.get("bids"), True)
+    offers = levels(data.get("offers"), False)
+    if bids and offers and bids[0][0] >= offers[0][0]:
+        raise FeedError("crossed or locked book")
+    timestamp = data.get("transactTime")
+    sequence = data.get("sequence", data.get("seqNum"))
+    try:
+        exchange_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if timestamp else None
+        if exchange_at is not None and exchange_at.tzinfo is None:
+            raise ValueError("exchange timestamp has no timezone")
+        sequence = int(sequence) if sequence is not None else None
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise FeedError("invalid order book timestamp or sequence") from exc
+    return Book(bids, offers, at, exchange_at.timestamp() if exchange_at else None, requested_at, sequence)
 
 
 def parse_index(payload: dict) -> dict[str, list[tuple[int, float]]]:
@@ -128,11 +189,28 @@ class Feed:
     async def window(self, product: Product, start: int) -> Window:
         return parse_window(product.symbol, await self._event(product, start), rule=product.rule)
 
-    async def settlement(self, product: Product, start: int):
-        return settlement_price(await self._event(product, start))
+    async def settlement(self, product: Product, start: int) -> Settlement | None:
+        event = await self._event(product, start)
+        market = event["events"][0]["markets"][0]
+        if market.get("status") not in FINAL_MARKET_STATUSES:
+            return None
+        window = parse_window(product.symbol, event, rule=product.rule)
+        terms = market["assetPriceTerms"]
+        if (window.start != start or window.horizon != product.horizon
+                or (terms.get("asset") or {}).get("symbol") != product.symbol or self.clock() < window.end):
+            raise FeedError("settlement event differs from the expected finished window")
+        payload = await self.venue.get(f"/v1/markets/{window.slug}/settlement")
+        payout = _official_payout(payload, window.slug)
+        if payout is None:
+            return None
+        _, price = settlement_price(event)
+        ptb = window.price_to_beat
+        return Settlement(window.slug, payout, ptb if ptb is not None and math.isfinite(ptb) else None, price)
 
     async def book(self, slug: str) -> Book:
-        return parse_book(await self.venue.get(f"/v1/markets/{slug}/book"), self.clock())
+        requested_at = self.clock()
+        payload = await self.venue.get(f"/v1/markets/{slug}/book")
+        return parse_book(payload, self.clock(), requested_at=requested_at, slug=slug)
 
     async def _history(self, index_ids, bucket: str, start: int):
         params = [("assets", i) for i in index_ids] + [

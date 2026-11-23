@@ -163,8 +163,11 @@ def _updown_like(desk_id, name, emoji, store, health_path, settings, now, limit=
     trades = []
     for t in store.trades(limit):
         if t.get("status") == "CLOSED":
-            status = {"take_profit": "OUT", "pre_news": "OUT", "target": "TARGET", "stop_loss": "STOP"}.get(
-                t.get("exit_reason"), "WIN" if t.get("outcome") == t.get("side") else "LOSS")
+            if t.get("outcome") == "OFFICIAL_PAYOUT":
+                status = "WIN" if t["net_pnl"] > 0 else "LOSS" if t["net_pnl"] < 0 else "FLAT"
+            else:
+                status = {"take_profit": "OUT", "pre_news": "OUT", "target": "TARGET", "stop_loss": "STOP"}.get(
+                    t.get("exit_reason"), "WIN" if t.get("outcome") == t.get("side") else "LOSS")
         else:
             status = "OPEN"
         trades.append({"desk": desk_id, "id": str(t["id"]), "market": t.get("key") or t.get("asset"),

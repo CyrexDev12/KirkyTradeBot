@@ -38,18 +38,19 @@ class SharedFeed:
     def __init__(self, feed, clock=time.time, ttl=2.0):
         self.feed, self.clock, self.ttl, self._cache = feed, clock, ttl, {}
 
-    async def _get(self, key, call):
+    async def _get(self, key, call, *, requested_after=None):
         hit = self._cache.get(key)
-        if hit and self.clock() - hit[0] < self.ttl:
+        if hit and self.clock() - hit[0] < self.ttl and (requested_after is None or hit[2] >= requested_after):
             if isinstance(hit[1], Exception):
                 raise hit[1]
             return hit[1]
+        requested_at = self.clock()
         try:
             value = await call()
         except ERRORS as exc:
-            self._cache[key] = (self.clock(), exc)
+            self._cache[key] = (self.clock(), exc, requested_at)
             raise
-        self._cache[key] = (self.clock(), value)
+        self._cache[key] = (self.clock(), value, requested_at)
         if len(self._cache) > 500:
             cutoff = self.clock() - 60
             self._cache = {k: v for k, v in self._cache.items() if v[0] >= cutoff}
@@ -63,6 +64,9 @@ class SharedFeed:
 
     async def book(self, slug):
         return await self._get(("book", slug), lambda: self.feed.book(slug))
+
+    async def execution_book(self, slug, ready_at):
+        return await self._get(("book", slug), lambda: self.feed.book(slug), requested_after=ready_at)
 
     async def seconds(self, ids, lookback=120):
         return await self._get(("s", tuple(ids), lookback), lambda: self.feed.seconds(ids, lookback))

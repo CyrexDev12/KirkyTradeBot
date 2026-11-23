@@ -8,7 +8,7 @@ import pytest
 
 from backend.trading.venue import PaperOnlyViolation, check_request
 from backend.updown import feed as feedmod
-from backend.updown.feed import (closing_minute_average, event_slug, parse_book, parse_index, parse_window,
+from backend.updown.feed import (Settlement, closing_minute_average, event_slug, parse_book, parse_index, parse_window,
                                  settlement_price, window_start)
 from backend.updown.model import fair_up, sigma_per_second, taker_fee
 from backend.updown.store import Store
@@ -174,7 +174,10 @@ class FakeFeed:
                       "MARKET_STATUS_OPEN", 0.095, product.horizon, product.rule)
 
     async def settlement(self, product, start):
-        return ("MARKET_STATUS_RESOLVED", self.settled) if self.settled else ("MARKET_STATUS_OPEN", None)
+        window = await self.window(product, start)
+        if self.settled is not None:
+            return Settlement(window.slug, float(self.settled >= window.price_to_beat),
+                              window.price_to_beat, self.settled)
 
     async def book(self, slug):
         return Book(((0.45, 400),), ((0.47, 400),), self.clock())
@@ -203,6 +206,8 @@ def test_worker_enters_once_per_window_journals_and_settles(tmp_path):
     assert store.open_trades() == []  # too early in the window
     now[0] = START + 300
     asyncio.run(worker.tick())
+    assert store.open_trades() == []
+    now[0] += 2
     asyncio.run(worker.tick())
     opened = store.open_trades()
     assert sorted(t["key"] for t in opened) == ["btc-15m", "eth-15m"]

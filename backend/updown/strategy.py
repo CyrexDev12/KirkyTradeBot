@@ -107,6 +107,8 @@ class Settings:
     participation: float = 0.5
     default_theta: float = 0.095
     max_index_age: float = 10.0  # seconds; older settlement-index prices are treated as stale
+    execution_latency_seconds: float = 2.0
+    max_book_age_seconds: float = 5.0
     take_profit_target: float = 0.0  # share of (1 - entry) to capture before selling; 0 = hold to settlement
     stop_loss: float = 0.0  # share of the entry price to lose before selling; 0 = no stop
 
@@ -175,6 +177,9 @@ class Book:
     yes_bids: tuple  # ((price, qty), ...) best first
     yes_offers: tuple
     at: float  # unix seconds the book was read
+    exchange_at: float | None = None
+    requested_at: float | None = None
+    sequence: int | None = None
 
     def side_asks(self, side: str):
         """Prices to BUY the side, best first."""
@@ -226,6 +231,7 @@ class Decision:
     cost: float = 0.0  # stake = price paid + fee = maximum loss
     edge: float | None = None  # per contract, after fees
     risk: dict = field(default_factory=dict)
+    fills: tuple[tuple[float, int], ...] = ()
 
 
 def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: float,
@@ -273,23 +279,40 @@ def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: 
     kelly = max(0.0, (fair - unit) / (1 - unit))
     budget = min(balance * s.max_stake, balance * s.kelly_fraction * kelly,
                  balance * s.max_open_stake - open_stake, balance - open_stake)
+    fills = _entry_fills(asks, fair, window.theta, budget, s)
+    if not fills:
+        return Decision("SKIP", "stake too small for one contract at the allowed risk", side=side, fair_up=p_up,
+                        fair_side=fair, price=top, edge=edge)
+    return _purchase(window, side, p_up, fills, balance, open_stake, s)
+
+
+def _entry_fills(asks, fair, theta, budget, settings, quantity=None, limit=None):
+    s = settings
     qty, cost, fills = 0, 0.0, []
     for price, displayed in asks:
-        if not s.price_min <= price <= s.price_max:
+        if (limit is None and not s.price_min <= price <= s.price_max) or (limit is not None and price > limit):
             break
-        level_unit = price + taker_fee(price, window.theta)
+        level_unit = price + taker_fee(price, theta)
         if fair - level_unit < s.min_edge:
             break
         room = int(displayed * s.participation)
-        take = min(room, int((budget - cost) // level_unit))
+        take = min(room, math.floor((budget - cost + 1e-10) / level_unit))
+        if quantity is not None:
+            take = min(take, quantity - qty)
         if take <= 0:
             continue
         fills.append((price, take))
         qty += take
         cost += take * level_unit
-    if qty < 1:
-        return Decision("SKIP", "stake too small for one contract at the allowed risk", side=side, fair_up=p_up,
-                        fair_side=fair, price=top, edge=edge)
+        if qty == quantity:
+            break
+    return tuple(fills)
+
+
+def _purchase(window, side, p_up, fills, balance, open_stake, settings):
+    s = settings
+    fair = p_up if side == "UP" else 1 - p_up
+    qty = sum(q for _, q in fills)
     gross = sum(p * q for p, q in fills)
     fee = sum(taker_fee(p, window.theta) * q for p, q in fills)
     avg = gross / qty
@@ -297,31 +320,27 @@ def evaluate(window: Window, book: Book, now: float, index_price: float, sigma: 
             "payout_if_right": float(qty), "profit_if_right": round(qty - gross - fee, 4),
             "expected_profit": round(qty * fair - gross - fee, 4), "open_stake_after": open_stake + gross + fee,
             "kelly_fraction": s.kelly_fraction, "max_stake_pct": s.max_stake,
-            "daily_loss_limit": s.daily_loss_limit, **bracket_metrics(avg, qty, gross + fee, window.theta, s)}
+            "max_open_stake_pct": s.max_open_stake, "daily_loss_limit": s.daily_loss_limit,
+            **bracket_metrics(avg, qty, gross + fee, window.theta, s)}
     return Decision("BUY", f"{side} fair {fair:.1%} vs {avg * 100:.0f}c ask", side=side, fair_up=p_up,
                     fair_side=fair, price=avg, quantity=qty, fee=fee, cost=gross + fee,
-                    edge=(qty * fair - gross - fee) / qty, risk=risk)
+                    edge=(qty * fair - gross - fee) / qty, risk=risk, fills=fills)
+
+
+def match_entry(window, book, side, quantity, limit, fair_up, budget, settings, *, balance, open_stake):
+    """Fill as much of the original buy intent as the execution book will support."""
+    fair = fair_up if side == "UP" else 1 - fair_up
+    fills = _entry_fills(book.side_asks(side), fair, window.theta, budget, settings, quantity, limit)
+    return _purchase(window, side, fair_up, fills, balance, open_stake, settings) if fills else None
 
 
 def early_exit(side: str, quantity: int, book: Book, fair_up_now: float, theta: float,
                settings: Settings = SETTINGS):
     """Sell when the market bids more than the contract is worth (after the exit fee)."""
     fair = fair_up_now if side == "UP" else 1 - fair_up_now
-    sold, proceeds, fee = 0, 0.0, 0.0
-    for price, displayed in book.side_bids(side):
-        if price - taker_fee(price, theta) < fair + settings.take_profit_edge:
-            break
-        take = min(quantity - sold, int(displayed * settings.participation))
-        if take <= 0:
-            continue
-        sold += take
-        proceeds += price * take
-        fee += taker_fee(price, theta) * take
-        if sold >= quantity:
-            break
-    if sold <= 0:
-        return None
-    return {"quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee, "fair_side": fair}
+    return sell_bids(book.side_bids(side), quantity, theta, settings.participation,
+                     lambda price: price - taker_fee(price, theta) >= fair + settings.take_profit_edge,
+                     fair_side=fair)
 
 
 def bracket_exit(trade: dict, book: Book, settings: Settings = SETTINGS):
@@ -340,19 +359,31 @@ def bracket_exit(trade: dict, book: Book, settings: Settings = SETTINGS):
         kind, floor = "stop_loss", 0.0
     else:
         return None
-    sold, proceeds, fee = 0, 0.0, 0.0
+    return sell_bids(bids, remaining, theta, settings.participation, lambda price: price >= floor - 1e-9,
+                     kind=kind, trigger=tp if kind == "target" else sl)
+
+
+def match_exit(trade, book, quantity, limit, kind, settings):
+    """Match the original sale against the post-latency book and its price floor."""
+    return sell_bids(book.side_bids(trade["side"]), min(trade["remaining"], quantity), trade["theta"],
+                     settings.participation, lambda price: price >= limit - 1e-9, kind=kind)
+
+
+def sell_bids(bids, quantity, theta, participation, price_passes, fair_side=None, **details):
+    sold, proceeds, fee, fills = 0, 0.0, 0.0, []
     for price, displayed in bids:
-        if price < floor - 1e-9:
+        if not price_passes(price):
             break
-        take = min(remaining - sold, int(displayed * settings.participation))
+        take = min(quantity - sold, int(displayed * participation))
         if take <= 0:
             continue
+        fills.append((price, take))
         sold += take
         proceeds += price * take
         fee += taker_fee(price, theta) * take
-        if sold >= remaining:
+        if sold >= quantity:
             break
     if sold <= 0:
         return None
-    return {"kind": kind, "quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee,
-            "fair_side": None, "trigger": tp if kind == "target" else sl}
+    return {"quantity": sold, "price": proceeds / sold, "gross": proceeds, "fee": fee,
+            "fair_side": fair_side, "fills": tuple(fills), **details}

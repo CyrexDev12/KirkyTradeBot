@@ -2,29 +2,27 @@
 
 The existing VM is `nfl-fair-value` in resource group `nfl-fair-value-rg`, subscription `25328a62-e79b-4f1e-aaf3-d94e1554430b`, region **Mexico Central**. Update it with `update.sh`. The updater discovers its actual region and size and does not deploy the Bicep template or replace the VM.
 
-This release updates the team scoring models to reduce the effect of extreme games. It adds QB/RB yardage forecasts, a weekly player picks board, and PNG and CSV graphs in Discord. All eight services run on the existing VM, including the new `wti-worker` and `natgas-worker` for the WTI crude and natural gas paper desks.
-
-On an existing five-ticket board, the first two tickets stay in their slots. The next scan can replace the other two-leg tickets with qualifying longer tickets while every game on the original is still pregame. The post identifies that revision and the API retains the superseded tickets. Once a ticket has started, its picks and prices are frozen.
+This release updates simulated execution for crypto Up/Down, gold, WTI and natural gas. The shared engine checks a fresh book after order latency, remembers consumed depth, stops executing at the window close, and waits for the official contract payout. Old closed paper trades retain their original records.
 
 ## Upload and start the update
 
-1. Use the prepared `.deploy/nfl-fair-value-azure.zip`, or build it on your computer from the updated project. On macOS or Linux:
+1. Use the prepared `.deploy/nfl-updown-execution-azure.zip`, or build it on your computer from the updated project. On macOS or Linux:
 
    ```bash
-   python3 deploy/package.py --output .deploy/nfl-fair-value-azure.zip
+   python3 deploy/package.py --output .deploy/nfl-updown-execution-azure.zip
    ```
 
    On Windows PowerShell:
 
    ```powershell
-   .\.venv\Scripts\python deploy/package.py --output .deploy/nfl-fair-value-azure.zip
+   .\.venv\Scripts\python deploy/package.py --output .deploy/nfl-updown-execution-azure.zip
    ```
 
-2. Open **Bash** Cloud Shell. Upload `nfl-fair-value-azure.zip` using **Manage files → Upload**. Extract it into a fresh source directory.
+2. Open **Bash** Cloud Shell. Upload `nfl-updown-execution-azure.zip` using **Manage files → Upload**. Extract it into a fresh source directory.
 
    ```bash
    nfl_update_dir="$(mktemp -d "$HOME/nfl-update.XXXXXX")"
-   unzip -q "$HOME/nfl-fair-value-azure.zip" -d "$nfl_update_dir"
+   unzip -q "$HOME/nfl-updown-execution-azure.zip" -d "$nfl_update_dir"
    cd "$nfl_update_dir"
    ```
 

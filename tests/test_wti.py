@@ -9,7 +9,7 @@ import random
 
 import pytest
 
-from backend.updown.feed import FeedError, event_slug, parse_index, parse_window, settlement_price
+from backend.updown.feed import FeedError, Settlement, event_slug, parse_index, parse_window, settlement_price
 from backend.updown.strategy import Book, Settings, Window, wti_products
 from backend.wti import Rules
 from backend.wti.events import ET, Calendar, Detector, Event, cl_last_trade, front_month_expiry
@@ -176,7 +176,8 @@ class FakeFeed:
     async def settlement(self, product, start):
         self._count("settlement")
         p = self.settled.get(product.key)
-        return ("MARKET_STATUS_RESOLVED", p) if p else ("MARKET_STATUS_OPEN", None)
+        if p is not None:
+            return Settlement(f"cpwtif-{product.key}-{start}", float(p >= 83.0), 83.0, p)
 
     async def book(self, slug):
         self._count("book")
@@ -203,6 +204,8 @@ def test_desk_runs_five_model_accounts_on_one_feed(tmp_path):
     asyncio.run(desk.tick())
     assert feed.calls["seconds"] == 1 and feed.calls["minutes"] == 1  # shared across 5 models
     assert feed.calls["book"] <= 2  # one per market, not one per model
+    now[0] += 2
+    asyncio.run(desk.tick())
     opened = {m: w.store.open_trades() for m, w in desk.workers.items()}
     assert all(len(v) == 2 for v in opened.values())  # 15m and 1h for every model
     assert {t["model"] for v in opened.values() for t in v} == set("ABCDE")

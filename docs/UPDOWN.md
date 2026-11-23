@@ -21,7 +21,11 @@ These details were checked against live responses on 2026-11-22. A trimmed captu
 3. **Compute fair value.** It treats the price as a driftless random walk and accounts for the 60-second averaging at the close (`backend/updown/model.py`). Inside the last minute, it uses the part of the closing average already observed. On about 2.5 days of history it scored a Brier score of about 0.18 at minute 5. A coin flip scores 0.25.
 4. **Pick a side.** Edge = fair value − ask − fee. It buys the side with the larger edge when that edge is at least 2¢ per contract.
 5. **Filters.** The contract must be priced between 10¢ and 90¢; the model was overconfident at the extremes. Entries are allowed from 60 s after the window starts until 90 s before it ends, one bet per asset per window.
-6. **Sell early or settle.** It sells early when a bid, after the exit fee, beats fair value by 1¢. Otherwise the bet settles on Polymarket's published settlement price. If that price hasn't appeared 30 minutes after the window ends, it settles on the index-derived close instead.
+6. **Sell early or settle.** A bid that beats fair value by 1¢ after fees can trigger a sale. At the window close, any remaining position waits for the official Polymarket US contract payout. An unresolved result stays pending. [Polymarket US settlement endpoint](https://docs.polymarket.us/api-reference/markets/get-market-settlement)
+
+Entry and exit signals become eligible to execute after two seconds. The worker uses an order book requested at or after that time. Each attempt fills only the depth available at acceptable prices in that book. A stop can fill below its trigger. A fill retires the displayed size at that price for the account, even across restarts. An increase in displayed size or a level disappearing and returning can make new depth available. The worker checks the deadline again after the request returns.
+
+The journal records the signal time, order eligibility time, execution book timestamps and size at each fill price. Orders waiting to be simulated stay in memory. A restart starts those decisions from a fresh signal.
 
 ## Risk (stated on every entry card)
 

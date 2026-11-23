@@ -103,9 +103,13 @@ def result_label(t):
     if t.get("exit_reason") == "stop_loss":
         leg = (t.get("exits") or [{}])[-1]
         return "🛑 STOPPED", f"stop-loss hit · sold at {_cents(leg.get('price', 0))}"
-    if t.get("outcome") == t.get("side"):
-        return "✅ WIN", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
-    return "❌ LOSS", f"settled **{t.get('outcome')}** at {_price(t, t.get('settlement_price'))}"
+    outcome = t.get("outcome")
+    if outcome == "OFFICIAL_PAYOUT":
+        leg = (t.get("exits") or [{}])[-1]
+        return "⚖️ SETTLED", f"official payout of {leg.get('price', 0) * 100:.6g}¢ per remaining contract"
+    label = "✅ WIN" if outcome == t.get("side") else "❌ LOSS"
+    price = t.get("settlement_price")
+    return label, f"settled **{outcome}**" + (f" at {_price(t, price)}" if price is not None else "")
 
 
 def updown_trade_card(t, desk: Desk = CRYPTO):

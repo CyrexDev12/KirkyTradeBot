@@ -24,7 +24,9 @@ The two desks run the same engine (`backend/wti`). Natural gas (`backend/natgas`
 3. **🎯 Take profit / 🛑 stop loss.** The ticket has a bracket: take profit at half the room to $1, stop at half the entry price. Each ticket states both prices and their P&L.
 4. **💸 Out.** It sells early when the bid beats fair value.
 5. **📰 Out before news.** New for oil: it sells just before a high-impact release if the bid at least gets the entry back (below).
-6. **✅ Win / ❌ loss.** Otherwise the bet settles on Polymarket's price.
+6. **✅ Win / ❌ loss.** At close, any remaining position waits for the official Polymarket US contract payout.
+
+The [shared execution engine](UPDOWN.md#how-it-decides-every-5-s) applies the same order latency, book freshness and depth rules to the oil and gas desks. Each model account tracks the depth it consumes independently.
 
 ## The five models
 

@@ -18,7 +18,7 @@
 
 1. **Pick.** The bot buys the side priced below its model value by at least 2¢ after fees. The model is `fair_up_point`: P(Up) = Φ(ln(S/O) / (σ√τ)). σ comes from two hours of one-minute gold index moves. It checks the index against **Coinbase PAXG-USD**, a token backed by gold, and skips if they differ by more than 1%. PAXG usually trades about 0.1–0.3% above spot.
 2. **Out.** It sells early when the bid, after the exit fee, beats fair value by 1¢.
-3. **Win / loss.** Otherwise the bet settles on Polymarket's published settlement price. If none appears within 30 minutes, it settles on the index price at the end second.
+3. **Win / loss.** At close, any remaining position waits for Polymarket US to publish the official contract payout.
 
 ## Take profit and stop loss
 

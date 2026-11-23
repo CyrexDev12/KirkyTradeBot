@@ -7,6 +7,7 @@ Run: ``python -m backend.updown.worker`` (crypto, ``data/updown``) or
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
@@ -16,14 +17,27 @@ import time
 import httpx
 
 from ..trading.venue import BASE, ReadOnlyVenueClient
-from .feed import Feed, FeedError, closing_minute_average, point_price
+from .feed import Feed, FeedError, closing_minute_average
 from .model import fair_value, sigma_per_second
 from .store import Store, data_directory
-from .strategy import SETTINGS, Settings, bracket_exit, early_exit, evaluate
+from .strategy import SETTINGS, Decision, Settings, Window, bracket_exit, early_exit, evaluate, match_entry, match_exit
 
 logger = logging.getLogger(__name__)
-FALLBACK_AFTER = 1800  # seconds after window end before using the index-derived close
 ERRORS = (httpx.HTTPError, FeedError, ValueError, KeyError)
+
+
+@dataclass(frozen=True)
+class EntryIntent:
+    window: Window
+    decision: Decision
+    decided_at: float
+    extra: dict
+
+
+@dataclass(frozen=True)
+class ExitIntent:
+    decision: dict
+    decided_at: float
 
 
 class Worker:
@@ -46,6 +60,8 @@ class Worker:
         self.errors: dict[str, str] = {}
         self._checked: dict[tuple, float] = {}
         self._missing: dict[tuple, float] = {}
+        self._entries: dict[str, EntryIntent] = {}
+        self._exits: dict[int, ExitIntent] = {}
 
     async def _window(self, product, start):
         key = (product.key, start)
@@ -58,16 +74,31 @@ class Worker:
         return cached
 
     async def tick(self):
+        open_trades = self.store.open_trades()
+        now = self.clock()
+        for trade in open_trades:
+            if trade["window_end_ts"] <= now:
+                await self._manage(trade, {}, {})
         ids = list(dict.fromkeys(p.index_id for p in self.products.values()))
+        index_ready = False
         try:
             seconds = await self.feed.seconds(ids)
             minutes = await self.feed.minutes(ids)
         except ERRORS as exc:
             self.errors["index"] = f"{type(exc).__name__}: {exc}"[:200]
-            return
-        self.errors.pop("index", None)
-        for trade in self.store.open_trades():
-            await self._manage(trade, seconds, minutes)
+            seconds, minutes = {}, {}
+            self._entries.clear()
+        else:
+            self.errors.pop("index", None)
+            index_ready = True
+        for trade in open_trades:
+            if trade["window_end_ts"] > now:
+                await self._manage(trade, seconds, minutes)
+        if index_ready:
+            await self._scan_entries(seconds, minutes)
+        await self._resolve_windows()
+
+    async def _scan_entries(self, seconds, minutes):
         for product in self.products.values():
             start = product.current_start(self.clock())
             # A series that isn't listed (e.g. gold 5m, or gold on weekends) is re-checked once a minute.
@@ -83,7 +114,6 @@ class Worker:
                     self.store.note_window(product.key, start, "no market listed for this window", self.clock())
                 else:
                     self.store.note_window(product.key, start, f"data unavailable: {type(exc).__name__}", self.clock())
-        await self._resolve_windows()
 
     def _inputs(self, window, seconds, minutes, now):
         if not seconds or not minutes:
@@ -96,18 +126,32 @@ class Worker:
         return seconds[-1][1], sigma, avg
 
     async def _consider(self, product, start, seconds, minutes):
-        window = await self._window(product, start)
-        now = self.clock()
         key = product.key
         held = self.store.held(key, start)
-        if held or window.price_to_beat is None or now < window.start + self.settings.entry_after_seconds - 5:
-            if not held:
-                why = ("market not open" if window.status != "MARKET_STATUS_OPEN"
-                       else "waiting for the price to beat / entry part")
-                self.store.note_window(key, start, why, now, window.price_to_beat)
+        pending = self._entries.get(key)
+        if pending and (held or pending.window.start != start):
+            self._entries.pop(key)
+            pending = None
+        if held:
+            return
+        if pending:
+            ready_at = pending.decided_at + self.settings.execution_latency_seconds
+            if self.clock() >= ready_at:
+                self._entries.pop(key)
+                await self._execute_entry(product, pending, ready_at)
+            return
+        window = await self._window(product, start)
+        now = self.clock()
+        if window.price_to_beat is None or now < window.start + self.settings.entry_after_seconds - 5:
+            why = ("market not open" if window.status != "MARKET_STATUS_OPEN"
+                   else "waiting for the price to beat / entry part")
+            self.store.note_window(key, start, why, now, window.price_to_beat)
             return
         if window.status != "MARKET_STATUS_OPEN":
             self.store.note_window(key, start, f"market not open ({window.status})", now, window.price_to_beat)
+            return
+        if now >= window.end - self.settings.entry_before_end_seconds:
+            self.store.note_window(key, start, "entry window closed", now, window.price_to_beat)
             return
         book = await self.feed.book(window.slug)
         coinbase = None
@@ -117,10 +161,14 @@ class Worker:
             except ERRORS as exc:
                 self.errors[f"coinbase-{product.coinbase}"] = f"{type(exc).__name__}: {exc}"[:200]
         now = self.clock()
+        self._check_book(book, now)
+        available = self.store.execution_book(window.slug, book)
+        if available is None:
+            raise FeedError("book observation arrived out of order")
         index_price, sigma, avg = self._inputs(window, seconds, minutes, now)
         p_up = self._fair(product, window, now, index_price, sigma, avg, seconds, minutes, book)
         snap = self.store.snapshot(now)
-        decision = evaluate(window, book, now, index_price, sigma, avg, coinbase, snap["balance"],
+        decision = evaluate(window, available, now, index_price, sigma, avg, coinbase, snap["balance"],
                             snap["open_stake"], snap["today_pnl"], held, self.settings, p_up=p_up,
                             cross_check=bool(product.coinbase))
         held_off = self.gate(product, window, now) if self.gate else None
@@ -130,89 +178,172 @@ class Worker:
                            coinbase=coinbase, fair_up=decision.fair_up,
                            yes_bid=book.yes_bids[0][0] if book.yes_bids else None,
                            yes_ask=book.yes_offers[0][0] if book.yes_offers else None)
+        reason = decision.reason
         if decision.action == "BUY":
-            trade = self.store.open(window, decision, now, {
+            self._entries[key] = EntryIntent(window, decision, self.clock(), {
                 "index_price": index_price, "coinbase_price": coinbase, "coinbase_product": product.coinbase,
-                "sigma_per_second": sigma, "seconds_left": round(window.end - now, 1), "rule": window.rule,
+                "sigma_per_second": sigma, "rule": window.rule,
                 **self.tag})
-            if trade:
-                logger.info("PAPER BUY %s %s x%s @ %.3f", key, decision.side, decision.quantity, decision.price)
-        self.store.note_window(key, start, decision.reason, now, window.price_to_beat)
+            reason = "buy signaled; waiting for an execution quote"
+        self.store.note_window(key, start, reason, now, window.price_to_beat)
+
+    def _check_book(self, book, now):
+        if not 0 <= now - book.at <= self.settings.max_book_age_seconds:
+            raise FeedError("book receipt is stale or ahead of the worker clock")
+        if book.exchange_at is not None and book.exchange_at > now + 2:
+            raise FeedError("exchange book timestamp is ahead of the worker clock")
+
+    async def _arrival_book(self, slug, ready_at, deadline):
+        if self.clock() >= deadline:
+            return None
+        read_for_execution = getattr(self.feed, "execution_book", None)
+        book = await (read_for_execution(slug, ready_at) if read_for_execution else self.feed.book(slug))
+        now = self.clock()
+        if now >= deadline or (book.exchange_at is not None and book.exchange_at >= deadline):
+            return None
+        self._check_book(book, now)
+        requested = book.requested_at if book.requested_at is not None else book.at
+        if not ready_at <= requested <= book.at:
+            raise FeedError("book was requested before the order could arrive")
+        return book
+
+    async def _execute_entry(self, product, intent, ready_at):
+        window, signal = intent.window, intent.decision
+        deadline = window.end - self.settings.entry_before_end_seconds
+        book = await self._arrival_book(window.slug, ready_at, deadline)
+        now = self.clock()
+        reason = "entry expired before execution" if book is None else "no fill at the signaled limit"
+        if book is not None:
+            available = self.store.execution_book(window.slug, book)
+            if available is None:
+                raise FeedError("execution book arrived out of order")
+            held_off = self.gate(product, window, now) if self.gate else None
+            snap = self.store.snapshot(now)
+            if held_off:
+                reason = held_off
+            elif snap["today_pnl"] <= -self.settings.daily_loss_limit * (snap["balance"] - snap["today_pnl"]):
+                reason = "daily loss limit reached before execution"
+            else:
+                budget = min(signal.cost, snap["balance"] - snap["open_stake"],
+                             snap["balance"] * self.settings.max_open_stake - snap["open_stake"],
+                             snap["balance"] * self.settings.max_stake)
+                fill = match_entry(window, available, signal.side, signal.quantity, signal.fills[-1][0],
+                                   signal.fair_up, budget, self.settings, balance=snap["balance"],
+                                   open_stake=snap["open_stake"])
+                now = self.clock()
+                if fill and now < deadline:
+                    trade = self.store.open(window, fill, now, {
+                        **intent.extra, "seconds_left": round(window.end - now, 1),
+                        "signal_at": intent.decided_at, "order_ready_at": ready_at,
+                    }, book=book, participation=self.settings.participation)
+                    if trade:
+                        reason = fill.reason
+                        logger.info("PAPER BUY %s %s x%s @ %.3f", product.key, fill.side, fill.quantity, fill.price)
+        self.store.note_window(product.key, window.start, reason, now, window.price_to_beat)
 
     async def _manage(self, trade, seconds, minutes):
         product = self.products.get(trade["key"])
         if product is None:
             return
-        start, end = trade["window_start_ts"], trade["window_end_ts"]
-        now = self.clock()
         try:
-            if now < end:
-                window = await self._window(product, start)
-                book = await self.feed.book(trade["market_slug"])
-                bracket = bracket_exit(trade, book, self.settings)
-                if bracket:  # the ticket's take-profit or stop-loss was hit
-                    self.store.partial_exit(trade["id"], bracket, self.clock())
-                    return
-                now = self.clock()
-                index_price, sigma, avg = self._inputs(window, seconds.get(product.symbol),
-                                                       minutes.get(product.symbol), now)
-                p_up = self._fair(product, window, now, index_price, sigma, avg, seconds.get(product.symbol),
-                                  minutes.get(product.symbol), book)
-                sold = (self.pre_exit(trade, book, now, p_up) if self.pre_exit else None) or \
-                    early_exit(trade["side"], trade["remaining"], book, p_up, trade["theta"], self.settings)
-                if sold:
-                    self.store.partial_exit(trade["id"], sold, self.clock())
-                return
-            key = (product.key, start)
-            if now - self._checked.get(key, 0) < 15:
-                return
-            self._checked[key] = now
-            _, price = await self.feed.settlement(product, start)
-            if price is not None:
-                self.store.settle(trade["id"], price, self.clock())
-                self.store.record_outcome(product.key, start, trade["price_to_beat"], price)
-                self._checked.pop(key, None)
-            elif now >= end + FALLBACK_AFTER:
-                close = await self._index_close(product, end)
-                if close is not None:
-                    self.store.settle(trade["id"], close, self.clock(), source="index fallback")
-                    self.store.record_outcome(product.key, start, trade["price_to_beat"], close)
+            if self.clock() < trade["window_end_ts"]:
+                await self._manage_exit(trade, product, seconds.get(product.symbol), minutes.get(product.symbol))
+            if self.clock() >= trade["window_end_ts"]:
+                self._exits.pop(trade["id"], None)
+                await self._settle_trade(trade, product)
         except ERRORS as exc:
             self.errors[f"trade-{trade['id']}"] = f"{type(exc).__name__}: {exc}"[:200]
+
+    async def _manage_exit(self, trade, product, seconds, minutes):
+        pending = self._exits.get(trade["id"])
+        if pending:
+            ready_at = pending.decided_at + self.settings.execution_latency_seconds
+            if self.clock() >= ready_at:
+                self._exits.pop(trade["id"])
+                await self._execute_exit(trade, pending, ready_at)
+            return
+        book = await self.feed.book(trade["market_slug"])
+        now = self.clock()
+        if now >= trade["window_end_ts"]:
+            return
+        self._check_book(book, now)
+        available = self.store.execution_book(trade["market_slug"], book)
+        if available is None:
+            return
+        decision = bracket_exit(trade, available, self.settings)
+        if decision is None and seconds and minutes:
+            window = await self._window(product, trade["window_start_ts"])
+            now = self.clock()
+            if now >= trade["window_end_ts"]:
+                return
+            self._check_book(book, now)
+            index_price, sigma, avg = self._inputs(window, seconds, minutes, now)
+            p_up = self._fair(product, window, now, index_price, sigma, avg, seconds, minutes, book)
+            decision = (self.pre_exit(trade, available, now, p_up) if self.pre_exit else None) or \
+                early_exit(trade["side"], trade["remaining"], available, p_up, trade["theta"], self.settings)
+        if decision:
+            self._exits[trade["id"]] = ExitIntent(decision, self.clock())
+
+    async def _execute_exit(self, trade, intent, ready_at):
+        end = trade["window_end_ts"]
+        book = await self._arrival_book(trade["market_slug"], ready_at, end)
+        if book is None:
+            return
+        available = self.store.execution_book(trade["market_slug"], book)
+        if available is None:
+            return
+        signal = intent.decision
+        kind = signal.get("kind", "take_profit")
+        quantity, limit = signal["quantity"], signal["fills"][-1][0]
+        if kind in ("target", "stop_loss"):
+            quantity = trade["remaining"]
+            limit = trade["take_profit_price"] if kind == "target" else 0.0
+        fill = match_exit(trade, available, quantity, limit, kind, self.settings)
+        now = self.clock()
+        if fill and now < end:
+            fill.update({key: signal[key] for key in ("fair_side", "trigger", "news") if key in signal})
+            fill.update(signal_at=intent.decided_at, order_ready_at=ready_at)
+            self.store.partial_exit(trade["id"], fill, now, book=book, participation=self.settings.participation)
 
     def _fair(self, product, window, now, index_price, sigma, avg, seconds, minutes, book):
         if self.fair_fn:
             return self.fair_fn(product, window, now, index_price, sigma, avg, seconds, minutes, book)
         return fair_value(window.rule, window.price_to_beat, index_price, window.end - now, sigma, avg)
 
-    async def _index_close(self, product, end):
-        rows = (await self.feed.seconds([product.index_id], lookback=int(self.clock() - end) + 70)).get(product.symbol, [])
-        if product.rule == "point":
-            price = point_price(rows, end)
-            return round(price, product.decimals) if price is not None else None
-        vals = [p for t, p in rows if end - 60 <= t < end]
-        return round(sum(vals) / len(vals), 2) if len(vals) >= 50 else None
+    async def _settle_trade(self, trade, product):
+        now = self.clock()
+        key = (product.key, trade["window_start_ts"])
+        if now - self._checked.get(key, float("-inf")) < 15:
+            return
+        self._checked[key] = now
+        result = await self.feed.settlement(product, key[1])
+        if result is None:
+            return
+        if result.slug != trade["market_slug"]:
+            raise FeedError("settlement market differs from trade")
+        self.store.settle(trade["id"], result.price, self.clock(), yes_payout=result.yes_payout,
+                          official_price_to_beat=result.price_to_beat)
+        self._checked.pop(key, None)
+        self.errors.pop(f"trade-{trade['id']}", None)
 
     async def _resolve_windows(self):
         """Record outcomes of windows the bot watched but did not trade (for calibration)."""
         now = self.clock()
-        for key, start, ptb in self.store.unresolved_windows(int(now) - 60):
-            product = self.products.get(key)
-            if product is None or ptb is None or start + product.seconds > now - 60:
-                continue
-            if now - self._checked.get((key, start), 0) < 60:
-                continue
+        before = {key: int(now) - product.seconds - 60 for key, product in self.products.items()}
+        pending = sorted(self.store.unresolved_windows(before),
+                         key=lambda row: (self._checked.get(row[:2], float("-inf")), row[1], row[0]))
+        for key, start, ptb in pending[:5]:
+            if now - self._checked.get((key, start), float("-inf")) < 60:
+                break
             self._checked[(key, start)] = now
             try:
-                _, price = await self.feed.settlement(product, start)
+                result = await self.feed.settlement(self.products[key], start)
             except ERRORS:
                 continue
-            if price is not None:
-                self.store.record_outcome(key, start, ptb, price)
+            if result is not None:
+                confirmed_open = result.price_to_beat if result.price_to_beat is not None else ptb
+                self.store.record_outcome(key, start, confirmed_open, result.price, outcome=result.outcome)
                 self._checked.pop((key, start), None)
-            elif now > start + product.seconds + 3 * 3600:
-                self.store.record_outcome(key, start, ptb, None)  # unknown; stop polling
-                logger.warning("No settlement for %s %s after 3h", key, start)
 
 
 async def serve(directory: Path | None = None, settings: Settings = SETTINGS, name: str = "Up/Down"):

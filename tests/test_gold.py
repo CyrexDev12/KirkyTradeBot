@@ -7,7 +7,7 @@ import random
 import pytest
 
 from backend.gold import SETTINGS as GOLD_SETTINGS
-from backend.updown.feed import event_slug, parse_index, parse_window, point_price, settlement_price, window_start
+from backend.updown.feed import Settlement, event_slug, parse_index, parse_window, point_price, settlement_price, window_start
 from backend.updown.model import fair_up_point, fair_value, sigma_per_second
 from backend.updown.store import Store
 from backend.updown.strategy import Book, Settings, Window, evaluate, gold_products
@@ -89,7 +89,9 @@ class GoldFeed:
 
     async def settlement(self, product, start):
         price = self.settled.get(product.key)
-        return ("MARKET_STATUS_RESOLVED", price) if price else ("MARKET_STATUS_OPEN", None)
+        window = gold_window(product.horizon, start=start)
+        if price is not None:
+            return Settlement(window.slug, float(price >= window.price_to_beat), window.price_to_beat, price)
 
     async def book(self, slug):
         return Book(((0.50, 300),), ((0.52, 300),), self.clock())
@@ -117,6 +119,7 @@ def test_gold_worker_picks_15m_and_hourly_separately_and_settles_win_and_loss(tm
     worker = Worker(store, feed, Settings(products=gold_products(("5m", "15m", "1h")), coinbase_max_gap=0.01,
                                           max_index_age=30), clock=lambda: now[0])
     asyncio.run(worker.tick())
+    now[0] += 2
     asyncio.run(worker.tick())
     assert sorted(t["key"] for t in store.open_trades()) == ["gold-15m", "gold-1h"]
     assert feed.window_calls.count("gold-5m") == 1  # missing series not re-queried within a minute
@@ -219,6 +222,8 @@ def test_worker_stops_out_a_losing_gold_pick_and_tracker_reports_it(tmp_path):
                         take_profit_target=0.5, stop_loss=0.5)
     worker = Worker(store, feed, settings, clock=lambda: now[0])
     asyncio.run(worker.tick())
+    now[0] += 2
+    asyncio.run(worker.tick())
     [trade] = store.open_trades()
     assert trade["stop_loss_price"] == 0.26 and trade["take_profit_price"] == 0.76
 
@@ -227,6 +232,9 @@ def test_worker_stops_out_a_losing_gold_pick_and_tracker_reports_it(tmp_path):
 
     feed.book = crashed_book
     now[0] = START + 420
+    asyncio.run(worker.tick())
+    assert store.open_trades()
+    now[0] += 2
     asyncio.run(worker.tick())
     [closed] = store.trades(5)
     assert closed["status"] == "CLOSED" and closed["exit_reason"] == "stop_loss" and closed["net_pnl"] < 0
