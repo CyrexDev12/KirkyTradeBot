@@ -22,10 +22,11 @@ from discord import app_commands
 from .messages import timestamp
 
 logger = logging.getLogger(__name__)
-KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "players")
+KINDS = ("picks", "updates", "reports", "parlay", "crypto", "gold", "players", "chief")
 MARKER = "pub "
 ROUTE_NAMES = {"crypto": "₿ BTC + crypto Up/Down paper trades", "gold": "🥇 Gold Up/Down paper picks",
                "parlay": "🏈 Weekly NFL parlays", "players": "NFL player yardage picks",
+               "chief": "🎖️ Chief Beef Kirkey (all-bot status + trade tracker)",
                "picks": "NFL paper picks", "updates": "NFL trade updates", "reports": "NFL account reports"}
 
 
@@ -456,6 +457,12 @@ def register_paper_commands(bot, posts: PaperPosts):
         if kind.value == "parlay":
             await interaction.response.send_message(f"🏈 Weekly parlay boards will post in {channel.mention}. "
                                                     "See the latest with /parlay.", ephemeral=True)
+            return
+        if kind.value == "chief":
+            await interaction.response.send_message(
+                f"🎖️ Chief Beef Kirkey will track every bot in {channel.mention}: every new trade and result, "
+                "alerts when a bot goes down or hits its loss limit, and status reports at 8 AM and 8 PM Arizona. "
+                "Use /chiefkirkey status any time.", ephemeral=True)
             return
         if kind.value == "players":
             await interaction.response.send_message(f"Weekly player yardage picks will post in {channel.mention}. "

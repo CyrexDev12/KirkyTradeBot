@@ -187,7 +187,7 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
                                  "picks","trade","account","performance","why-no-trades","health",
                                  "paper-pause","paper-resume","paper-channels","parlay","crypto-account","crypto-trades","crypto-stats",
                                  "updown-account","updown-trades","updown-stats",
-                                 "gold-account","gold-results","gold-stats","gold-picks","player-stats","pygraph"}
+                                 "gold-account","gold-results","gold-stats","gold-picks","chiefkirkey","player-stats","pygraph"}
         assert bot.intents.value == 1
         for command in commands.values():
             command.to_dict(bot.tree)
@@ -198,7 +198,7 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
         channel_setup = commands["paper-channels"].get_command("set")
         with pytest.raises(discord.app_commands.MissingPermissions):
             channel_setup.checks[0](SimpleNamespace(permissions=discord.Permissions.none()))
-        assert {c.value for c in channel_setup.parameters[0].choices} == {"picks", "updates", "reports", "parlay", "crypto", "gold", "players"}
+        assert {c.value for c in channel_setup.parameters[0].choices} == {"picks", "updates", "reports", "parlay", "crypto", "gold", "players", "chief"}
         games = [{**payload["game"],"game_id":str(i)} for i in range(16)]
         view = MatchupView(games)
         assert len(view.children) == 16

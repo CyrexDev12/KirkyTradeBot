@@ -44,6 +44,9 @@ class PredictionAPI:
     async def gold(self, path, **params):
         return await self.get("/api/gold" + path, **params)
 
+    async def tracker(self, path, **params):
+        return await self.get("/api/tracker" + path, **params)
+
     async def player_projection(self, player, stat, *, team=None, season=None, week=None):
         return await self.get("/api/players/projection", player=player, stat=stat, team=team,
                               season=season, week=week, timeout=90)
