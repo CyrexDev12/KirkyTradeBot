@@ -90,7 +90,10 @@ if [[ -f "$app_dir/.env" ]]; then ln -s "$app_dir/.env" "$stage/.env"; fi
 "${new_compose[@]}" config --quiet
 
 # Pin old image IDs before the build moves the latest tags.
-mapfile -t old_services < <("${compose[@]}" config --services)
+old_services=()
+while IFS= read -r service; do
+    old_services+=("$service")
+done < <("${compose[@]}" config --services)
 printf 'services:\n' > "$backup/rollback-images.yaml"
 backend_image=''
 for service in "${old_services[@]}"; do
@@ -121,8 +124,8 @@ for service in backend bot paper-worker; do
     if [[ "$service" == bot ]]; then
         imports='import bot.discord_bot; import bot.paper'
     elif [[ "$service" == backend ]]; then
-        # The crypto worker uses this same backend image.
-        imports='import backend.app; import backend.crypto.worker'
+        # All three market workers use this same backend image.
+        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker'
     else
         imports='import backend.app; import backend.trading.worker'
     fi
@@ -178,6 +181,8 @@ async def check():
 asyncio.run(check())'
 curl -fsS http://127.0.0.1:8000/api/crypto/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/crypto/stats > /dev/null
+curl -fsS http://127.0.0.1:8000/api/updown/account > /dev/null
+curl -fsS http://127.0.0.1:8000/api/gold/account > /dev/null
 curl -fsS http://127.0.0.1:8000/api/paper/parlay > /dev/null
 "${compose[@]}" ps
 curl -fsS http://127.0.0.1:8000/healthz

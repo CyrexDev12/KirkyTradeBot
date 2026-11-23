@@ -175,6 +175,10 @@ def test_vm_update_preserves_secrets_and_recovers_on_failure(tmp_path, failure):
         assert len(backups) == 1
         with tarfile.open(backups[0]) as backup:
             assert backup.extractfile('./preserved-state').read() == b'prediction and delivery history'
+    if failure != 'build':
+        import_commands = [call[-1] for call in calls if call[0] == 'run' and '--entrypoint' in call]
+        assert any('backend.updown.worker' in code and 'backend.gold.worker' in code
+                   for code in import_commands)
 
 
 @pytest.mark.skipif(not BASH or not Path(BASH).exists(), reason="Bash is required")

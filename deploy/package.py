@@ -78,5 +78,5 @@ def build(destination, root=ROOT):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / ".deploy/nfl-discord-azure.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / ".deploy/nfl-fair-value-azure.zip")
     build(parser.parse_args().output)

@@ -2,18 +2,18 @@
 
 The bot is configured for application `1572302708419985518` and server `1572300706478817441`. Its default alert time is 30 minutes before kickoff. Set the destination channel after deployment with `/alerts setup`.
 
-**Updating the live Mexico Central VM:** use [UPDATE_AZURE.md](UPDATE_AZURE.md) and `deploy/azure/update.sh`. This preserves the existing Discord token and runtime data, adds the paper worker, and does not reprovision the VM. The instructions below primarily cover creating a new installation.
+**Updating the live Mexico Central VM:** use [UPDATE_AZURE.md](UPDATE_AZURE.md) and `deploy/azure/update.sh`. This preserves the existing Discord token and runtime data, updates all six services, and does not reprovision the VM. The instructions below primarily cover creating a new installation.
 
 ## Deploy yourself using Azure Cloud Shell
 
-This route uses the Azure account you sign into through the portal. The prepared bundle is `.deploy/nfl-discord-azure.zip` in the project directory. It contains the application and deployment files. The token is entered separately at a hidden prompt.
+This route uses the Azure account you sign into through the portal. Build `.deploy/nfl-fair-value-azure.zip` with `python3 deploy/package.py --output .deploy/nfl-fair-value-azure.zip`. It contains the application and deployment files. The token is entered separately at a hidden prompt.
 
-1. Open Azure Cloud Shell in Bash through the Azure portal. Use its upload control to upload `nfl-discord-azure.zip`.
+1. Open Azure Cloud Shell in Bash through the Azure portal. Use its upload control to upload `nfl-fair-value-azure.zip`.
 2. Extract the package and list your subscriptions.
 
 ```bash
-unzip nfl-discord-azure.zip -d nfl-discord
-cd nfl-discord
+unzip nfl-fair-value-azure.zip -d nfl-fair-value
+cd nfl-fair-value
 az account list --query "[].{Name:name,ID:id,State:state}" -o table
 ```
 
@@ -23,7 +23,7 @@ az account list --query "[].{Name:name,ID:id,State:state}" -o table
 bash deploy/azure/deploy.sh YOUR_SUBSCRIPTION_ID --plan
 ```
 
-4. Deploy with the same ID. The script validates the Azure template, prompts for your Discord bot token with input hidden, creates the VM, installs Docker, uploads the application, and starts both services.
+4. Deploy with the same ID. The script validates the Azure template, prompts for your Discord bot token with input hidden, creates the VM, installs Docker, uploads the application, and starts the configured services.
 
 ```bash
 bash deploy/azure/deploy.sh YOUR_SUBSCRIPTION_ID
@@ -39,11 +39,11 @@ To change supported deployment settings before running the script, set `NFL_RESO
 
 The subscription's permitted regions reported on November 17, 2026 are `francecentral`, `belgiumcentral`, `germanywestcentral`, `canadacentral`, and `mexicocentral`. Mexico Central was the successful region and is now the default. The `bicep.use_binary_from_path` configuration message is informational; the original deployment blocker was `RequestDisallowedByAzure` for West US 2.
 
-Upload the updated `nfl-discord-azure.zip` to Cloud Shell's home directory. At a **PowerShell** prompt such as `PS /home/luke/nfl-discord>`, run:
+Upload the updated `nfl-fair-value-azure.zip` to Cloud Shell's home directory. At a **PowerShell** prompt such as `PS /home/luke/nfl-fair-value>`, run:
 
 ```powershell
-unzip -o "$HOME/nfl-discord-azure.zip" -d "$HOME/nfl-discord"
-Set-Location "$HOME/nfl-discord"
+unzip -o "$HOME/nfl-fair-value-azure.zip" -d "$HOME/nfl-fair-value"
+Set-Location "$HOME/nfl-fair-value"
 $env:NFL_AZURE_LOCATION = 'mexicocentral'
 $subscriptionId = az account show --query id -o tsv
 if ($LASTEXITCODE -ne 0) { throw 'Select your school subscription before continuing.' }
