@@ -75,6 +75,25 @@ def test_weights_and_forward_bank(schedule):
     assert fit.means(target) == pytest.approx(expected - [3,0])
 
 
+def test_extreme_pregame_input_has_bounded_score_and_residual_influence(schedule):
+    target = schedule[-1]
+    normal = snapshot(schedule, target)
+    edited = deepcopy(schedule)
+    outlier = next(g for g in edited if g["week"] == target["week"] - 1 and target["home"] in (g["home"], g["away"]))
+    side = "home" if outlier["home"] == target["home"] else "away"
+    outlier[f"{side}_score"] = 180
+    outlier["result"] = outlier["home_score"] - outlier["away_score"]
+    robust = snapshot(edited, target)
+    f = robust.forecast(target, "reconstruction")
+    team = f["teams"][target["home"]]
+    assert team["adjusted_scoring_games"] >= 1
+    assert team["weighted_for"] < team["points_for"]
+    assert abs(f["fitted_score_means"][0] - normal.ratings.means(target)[0]) < 5
+    assert f["diagnostics"]["adjusted_residual_pairs"] >= 1
+    assert max(max(pair["actual"]) for pair in robust.bank) == 180
+    assert max(h + a for h, a, _ in f["paired_score_counts"]) < outlier["home_score"] + outlier["away_score"]
+
+
 def test_january_season_cutoff_and_invalid_data(schedule):
     january = {**schedule[0],"kickoff":"2026-01-04T18:00:00+00:00","week":18}
     assert len(completed_inputs([january],2025)) == 1

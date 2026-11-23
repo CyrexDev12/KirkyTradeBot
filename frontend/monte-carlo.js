@@ -96,9 +96,14 @@ function openMcGame(g) {
     return;
   }
   const away = f.teams[g.away], home = f.teams[g.home];
+  const robust = Number.isInteger(home.adjusted_scoring_games) && Number.isInteger(away.adjusted_scoring_games);
   const stats = [['Games','games',0],['Effective games','effective_n',1],['Points scored / game','points_for',1],
-    ['Points allowed / game','points_allowed',1],['Weighted points scored','weighted_for',1],['Weighted points allowed','weighted_allowed',1],
+    ['Points allowed / game','points_allowed',1],
+    [robust ? 'Robust weighted points scored' : 'Weighted points scored','weighted_for',1],
+    [robust ? 'Robust weighted points allowed' : 'Weighted points allowed','weighted_allowed',1],
     ['Scoring strength','scoring_strength',1],['Score prevention','score_prevention',1]];
+  if (robust) stats.push(['Scoring games adjusted','adjusted_scoring_games',0],
+    ['Points allowed games adjusted','adjusted_defensive_games',0]);
   const weights = (team, summary) => `<details><summary>${safe(team)} game weights</summary>${Object.entries(summary.game_weights)
     .map(([id,w])=>mcRow(id,numeric(w,3))).join('')}</details>`;
   const market = g.mc_values?.moneyline;

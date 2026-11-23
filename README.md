@@ -39,12 +39,13 @@ For a forced data rebuild, run `.venv/bin/python -m backend.prepare --refresh`. 
 
 - Schedule and play-by-play data come from [`nflreadpy`](https://nflreadpy.nflverse.com/api/load_functions/). The pipeline stores per-team, per-game EPA, success rate, passing and rushing EPA, explosive rates, defensive equivalents, QB dropback EPA, and CPOE when present. It also derives recent form, records, opponent-strength history, rest difference, and a season-regressed Elo baseline.
 - Each game's features are captured before its result and play-by-play enter the team history. Completed games are processed chronologically. Current games with no final score never update the historical features.
+- Rolling score and efficiency features limit the influence of unusual values using the median and median absolute deviation of earlier games. The totals model uses absolute error during training. Final scores and realized errors are retained for evaluation and totals interval calibration.
 - The win-probability model is a deterministic histogram gradient-boosted classifier. It has no Polymarket price input. For each walk-forward season, a logistic calibration mapping is fit only on earlier out-of-sample seasons; the production mapping is fit on past seasons. Home and away probabilities sum to one. Ties are rare and excluded from binary model training; market tie settlement is shown in game details.
 - A separate histogram gradient-boosted regression model predicts combined final points, including overtime. It uses only pregame rolling team points scored and allowed, offensive and defensive efficiency, recent scoring, play volume, rest, week, and season. Its over/under probability at each listed line comes from the empirical distribution of prior-season out-of-sample score errors. The 80% interval is built from those errors. Exchange prices never enter this model.
 - Validation is season walk-forward: each test season is predicted by a model trained on earlier seasons. Historical predictions are labeled **reconstructions**, because they were not contemporaneously archived. The validation endpoint reports Brier score, log loss, accuracy, season breakdowns, and calibration bins. Trading performance is intentionally absent without real timestamped historical quotes.
 - Predictions generated before kickoff are cached and frozen after kickoff. Market prices are never used to retrain the model. If data or model artifacts are unavailable, the UI shows an error or empty value instead of a substitute estimate.
 
-The initial win-model run in this workspace produced 1,420 prior-season out-of-sample games with a Brier score of 0.2291, log loss of 0.6502, and accuracy of 0.6387. The total-points model's 2021–2025 walk-forward evaluation covered 1,424 games with MAE 10.8 points, RMSE 13.59 points, and 82.3% coverage of its nominal 80% interval. Rebuilds can change these values as NFLverse data is updated.
+The current walk-forward scores and interval coverage are available at `/api/model/metrics` and `/api/model/totals-metrics` after the models finish training.
 
 ## Market matching and valuation
 
@@ -69,9 +70,9 @@ home mean = b + home scoring strength - away score prevention + h/2
 away mean = b + away scoring strength - home score prevention - h/2
 ```
 
-The intercept is unpenalized. Team coefficients have ridge penalty 4 and the home-margin coefficient has penalty 16. A game contributes two score rows with the same unnormalized weight, `2 ** (-age_days / 28)`. The free intercept and equal positive penalties force each family of team effects to average zero. Neutral games use zero venue adjustment. Every fitted coefficient, baseline, and residual comes from the selected season. Predictions are independent of prices, quantities, and the earlier-season models.
+The intercept is unpenalized. Team coefficients have ridge penalty 4 and the home-margin coefficient has penalty 16. A game contributes two score rows with recency weight `2 ** (-age_days / 28)`. The score fit uses Huber weighting so large fitted errors have less influence. The free intercept and equal positive penalties force each family of team effects to average zero. Neutral games use zero venue adjustment. Every fitted coefficient, baseline, and residual comes from the selected season. Predictions are independent of prices, quantities, and the earlier-season models.
 
-Public availability requires four games for each team, 40 forward error pairs, and residual effective sample size 25. Four or five team games receive a **Limited sample** label. Internal fits can generate error pairs once each team has two games. A previous-week fit predicts both sides of each earlier game, then its errors enter the paired bank. Weighted errors are centered by role and sampled together. Neutral-site banks additionally include equally weighted swapped pairs. The rounding rule is `max(0, floor(mean + error + 0.5))`. All scores, margins, totals, and probabilities use those same draws.
+Public availability requires four games for each team, 40 forward error pairs, and residual effective sample size 25. Four or five team games receive a **Limited sample** label. The weighted points per game baseline bounds extreme scored and allowed values once a team has six games. The matchup detail shows the original averages and the number of adjustments. A previous-week fit predicts both sides of each earlier game. The simulator bounds the influence of extreme errors and samples the centered errors in their original pairs. Neutral-site banks additionally include equally weighted swapped pairs. The rounding rule is `max(0, floor(mean + error + 0.5))`. All scores, margins, totals, and probabilities use those same draws.
 
 ### Cutoffs, storage and reproducibility
 
@@ -137,6 +138,14 @@ The pooled residual bank has finite support and cannot capture every matchup's v
 
 A separate `paper-worker` service runs a persistent $100 **paper** account. It records public Polymarket US books, plans weekly contract-price trades only when both the GB model and the MC model support the same contract after costs, simulates fills conservatively against observed depth, and posts plans, trade cards and weekly reports to Discord (`/picks`, `/trade`, `/account`, `/performance`, `/why-no-trades`, `/health`). It never submits real orders. The current strategy can use labeled modeled-path estimates before recorded market-path history is sufficient; missing model inputs or failed screening gates produce no qualifying trades. See [docs/PAPER_TRADING.md](docs/PAPER_TRADING.md) for setup, rules and the capability report. The `/api/paper/*` endpoints are listed at `/docs`.
 
+## Discord player yardage and graphs
+
+- `/player-stats player:<name> stat:rushing|passing` estimates QB passing or rushing yards and RB rushing yards. It defaults to the player's next confirmed game. Optional `team`, `season`, and `week` identify a specific matchup. An earlier week returns a labeled pregame reconstruction. The response includes the season average, opponent yards allowed, projected workload, and an 80% prediction interval.
+- `/paper-channels set kind:players channel:#player-stats` sets the weekly player props channel. The board adds up to ten qualifying picks from verified Polymarket US lines for games still to be played. The number of picks depends on available lines and prices. The bot updates one board per server and NFL week.
+- `/pygraph dataset:team-points subject:KC` attaches a PNG and CSV of points scored and allowed, including the robust values used to inspect outliers. Use `dataset:rushing` or `dataset:passing` with a player's name in `subject` to inspect yardage history and the model estimate. `season` is optional, and player charts also accept `week` and `team`.
+
+The yardage model blends recent and longer player history, carries or attempts, and efficiency. It adjusts for the opponent's yards allowed relative to the league. Robust limits reduce the influence of unusual yardage, workload, and defensive games. The interval uses the middle 80% of scaled errors from a chronological replay of the previous season. Picks compare model probabilities conditional on participation with the estimated cost of ten contracts, including exchange fees. A player with no qualifying snap settles under the venue's last fair market price rule.
+
 ## API
 
 | Endpoint | Description |
@@ -155,6 +164,9 @@ A separate `paper-worker` service runs a persistent $100 **paper** account. It r
 | `/api/monte-carlo/predictions?season=2026&week=11` | Current-season forecasts and structured availability states |
 | `/api/games/{game_id}/monte-carlo` | One archived MC forecast with distributions and provenance |
 | `/api/model/monte-carlo-metrics?season=2026` | Chronological reconstruction, coverage and matched-game metrics |
+| `/api/players/projection` | Pregame player yardage estimate and supporting game history |
+| `/api/players/picks` | Ranked weekly rushing and passing props with verified quotes |
+| `/api/graphs/team-points?team=KC` | Original and adjusted regular-season team scoring data |
 
 The dashboard accepts `model=existing`, `model=monte_carlo`, or `model=compare`. Its default is `existing`.
 

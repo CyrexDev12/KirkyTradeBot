@@ -18,6 +18,7 @@ from .crypto import CryptoPublisher, register_crypto_commands
 from .updown import GOLD, UpdownPublisher, register_gold_commands, register_updown_commands
 from .messages import matchup_embed, timestamp, week_embed
 from .paper import PaperPosts, PaperPublisher, PaperTransport, register_paper_commands
+from .player_stats import PlayerPicksPublisher, register_player_commands
 from .scheduler import AlertScheduler, utcnow
 from .storage import Store
 
@@ -98,12 +99,14 @@ class NFLBot(discord.Client):
         self.crypto_publisher = CryptoPublisher(api, self.paper_posts, self.paper_publisher)
         self.updown_publisher = UpdownPublisher(api, self.paper_posts, self.paper_publisher)
         self.gold_publisher = UpdownPublisher(api, self.paper_posts, self.paper_publisher, GOLD)
+        self.player_publisher = PlayerPicksPublisher(api, self.paper_posts, self.paper_publisher)
         self.tree.on_error = report_error
         self.register_commands()
         register_paper_commands(self, self.paper_posts)
         register_crypto_commands(self)
         register_updown_commands(self)
         register_gold_commands(self)
+        register_player_commands(self)
 
     async def setup_hook(self):
         if self.guild_id:
@@ -114,10 +117,12 @@ class NFLBot(discord.Client):
             await self.tree.sync()
         self.post_alerts.start()
         self.post_crypto.start()
+        self.post_player_picks.start()
 
     async def close(self):
         self.post_alerts.cancel()
         self.post_crypto.cancel()
+        self.post_player_picks.cancel()
         await self.api.close()
         await super().close()
 
@@ -148,6 +153,19 @@ class NFLBot(discord.Client):
             await self.crypto_publisher.tick()
             await self.updown_publisher.tick()
             await self.gold_publisher.tick()
+
+    @tasks.loop(minutes=15)
+    async def post_player_picks(self):
+        if not self.is_ready():
+            return
+        try:
+            await self.player_publisher.tick()
+        except Exception as exc:
+            logger.warning("Player picks poll failed (%s)", type(exc).__name__)
+
+    @post_player_picks.before_loop
+    async def before_player_picks(self):
+        await self.wait_until_ready()
 
     async def show_game(self, interaction, game_id):
         payload = await self.api.forecast(game_id)
@@ -221,7 +239,10 @@ class NFLBot(discord.Client):
                 "🎲 **Polymarket Up/Down desk** · /updown-trades, /updown-stats, /updown-account.\n"
                 "🥇 **Gold desk** · /gold-picks, /gold-results, /gold-stats, /gold-account "
                 "(channel: /paper-channels set gold).\n"
+                "**Player yardage** · /player-stats for a rushing or passing forecast. "
+                "/pygraph for team scoring or player yardage history with a CSV.\n"
                 "📣 **Server managers** · /paper-channels setup picks the BTC and parlay channels. "
+                "Choose the player yardage channel with /paper-channels set players. "
                 "/paper-channels show lists them. /alerts setup turns on pregame predictions.",
                 ephemeral=True)
 

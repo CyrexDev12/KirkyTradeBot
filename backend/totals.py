@@ -8,13 +8,22 @@ import pickle
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-from .data import DATA, TOTAL_FEATURES, load_feature_rows
+from .data import DATA, TOTAL_FEATURES, frozen_pregame_predictions, load_feature_rows
 
-VERSION = "total-points-hgb-v1"
-PREDICTIONS = DATA / "total_predictions.json"
-METRICS = DATA / "total_model_metrics.json"
-ARTIFACT = DATA / "total_model.pkl"
-RESIDUALS = DATA / "total_oos_residuals.json"
+VERSION = "total-points-hgb-v2-robust"
+LEGACY_PREDICTIONS = DATA / "total_predictions.json"
+PREDICTIONS = DATA / f"total_predictions_{VERSION}.json"
+METRICS = DATA / f"total_model_metrics_{VERSION}.json"
+ARTIFACT = DATA / f"total_model_{VERSION}.pkl"
+RESIDUALS = DATA / f"total_oos_residuals_{VERSION}.json"
+
+
+def needs_refresh() -> bool:
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        return now - min(path.stat().st_mtime for path in (PREDICTIONS, METRICS, RESIDUALS, ARTIFACT)) > 6 * 3600
+    except FileNotFoundError:
+        return True
 
 
 def _xy(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
@@ -27,7 +36,7 @@ def _fit(rows: list[dict]) -> HistGradientBoostingRegressor:
     if len(rows) < 300:
         raise RuntimeError("Insufficient completed NFL games for total-points model")
     x, y = _xy(rows)
-    model = HistGradientBoostingRegressor(max_iter=140, max_leaf_nodes=10, learning_rate=0.04,
+    model = HistGradientBoostingRegressor(loss="absolute_error", max_iter=140, max_leaf_nodes=10, learning_rate=0.04,
                                           l2_regularization=8, min_samples_leaf=45, random_state=31)
     model.fit(x, y)
     return model
@@ -106,14 +115,9 @@ def train(refresh_data: bool = False) -> dict:
             predictions[gid] = {"predicted_total": round(estimate, 1), "interval_low": lo,
                                 "interval_high": hi, "kind": "live_pregame", "generated_at": now,
                                 "model_version": VERSION}
-    if PREDICTIONS.exists():
-        old = json.loads(PREDICTIONS.read_text())
-        for row in rows:
-            if (datetime.fromisoformat(row["kickoff"]) <= datetime.now(timezone.utc)
-                    and old.get(row["game_id"], {}).get("kind") == "live_pregame"):
-                predictions[row["game_id"]] = old[row["game_id"]]
+    predictions.update(frozen_pregame_predictions(rows, LEGACY_PREDICTIONS, PREDICTIONS))
     validation = {"model_version": VERSION, "generated_at": now,
-                  "method": "Season walk-forward regression; each test season uses earlier seasons only. The 80% interval for a test season uses earlier out-of-sample residuals.",
+                  "method": "Absolute-error season walk-forward regression; each test season uses earlier seasons only. The 80% interval for a test season uses earlier out-of-sample residuals.",
                   "seasons": by_season,
                   "aggregate": {"games": len(validation_errors),
                                 "mae": round(float(np.mean(np.abs(validation_errors))), 2) if validation_errors else None,
@@ -121,12 +125,14 @@ def train(refresh_data: bool = False) -> dict:
                                 "bias": round(float(np.mean(validation_errors)), 2) if validation_errors else None,
                                 "interval_coverage": round(float(np.mean(validation_hits)), 3) if validation_hits else None},
                   "note": "Full-game points include overtime. Historical totals-market prices are not available here, so this is score validation, not a trading backtest. Historical forecasts are reconstructions."}
-    for path, payload in ((PREDICTIONS, predictions), (METRICS, validation), (RESIDUALS, prior_residuals)):
+    for path, payload in ((RESIDUALS, prior_residuals), (METRICS, validation), (PREDICTIONS, predictions)):
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, allow_nan=False))
         tmp.replace(path)
-    with ARTIFACT.open("wb") as f:
+    tmp_artifact = ARTIFACT.with_suffix(".tmp")
+    with tmp_artifact.open("wb") as f:
         pickle.dump({"model": final_model, "features": TOTAL_FEATURES, "version": VERSION}, f)
+    tmp_artifact.replace(ARTIFACT)
     return validation
 
 

@@ -17,10 +17,12 @@ import argparse
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .common import D, dumps, utc
 from .config import StrategyConfig
-from .inputs import UNCERTAINTY_PATH
+from .inputs import UNCERTAINTY_MODEL_VERSIONS, UNCERTAINTY_PATH
 from .store import Store
 from .worker import DB_PATH
 
@@ -94,12 +96,20 @@ def cmd_uncertainty(store, cfg, args):
                                         f"mc_validation reconstructions, seasons {seasons} (37.5/44.5/51.5 lines)")
         profiles += [p] if p else []
     UNCERTAINTY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"generated_at": _now().isoformat(), "profiles": [
+    payload = {"generated_at": _now().isoformat(), "model_versions": UNCERTAINTY_MODEL_VERSIONS, "profiles": [
         {"provider": p.provider, "market_type": p.market_type, "half_width": str(p.half_width), "method": p.method,
          "evaluated_games": p.evaluated_games, "source": p.source} for p in profiles],
         "note": "GB total-line probabilities have no calibration bins in the existing metrics; GB totals remain "
                 "unsupported until such an evaluation exists."}
-    UNCERTAINTY_PATH.write_text(json.dumps(payload, indent=2))
+    temp = None
+    try:
+        with NamedTemporaryFile(mode="w", dir=UNCERTAINTY_PATH.parent, delete=False, encoding="utf-8") as file:
+            temp = Path(file.name)
+            json.dump(payload, file, indent=2)
+        temp.replace(UNCERTAINTY_PATH)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
     print(json.dumps(payload, indent=2))
 
 
