@@ -125,7 +125,7 @@ for service in backend bot paper-worker; do
         imports='import bot.discord_bot; import bot.paper; import bot.player_stats; from matplotlib.backends.backend_agg import FigureCanvasAgg; from matplotlib.figure import Figure; FigureCanvasAgg(Figure()).draw()'
     elif [[ "$service" == backend ]]; then
         # Build the desks with their production defaults using only disposable storage.
-        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.natgas.worker; from backend.wti.worker import Desk; from backend.wti.commodity import NATGAS; Desk(None); Desk(None, commodity=NATGAS)'
+        imports='import backend.app; import backend.crypto.worker; import backend.updown.worker; import backend.gold.worker; import backend.natgas.worker; import backend.wti.replay; import backend.wti.replay_capture; import backend.wti.live_worker; import backend.wti.oil_d_shadow_exits; import backend.wti.oil_d_paper; import backend.wti.paper_execution_replay; from backend.wti.worker import Desk; from backend.wti.commodity import NATGAS; Desk(None); Desk(None, commodity=NATGAS)'
     else
         imports='import backend.app; import backend.trading.worker'
     fi
@@ -136,6 +136,26 @@ for service in backend bot paper-worker; do
         --entrypoint python "$project-$service:latest" \
         -c "import os; assert os.getuid() == 10001; $imports; print('Startup checks passed: $service')"
 done
+
+# An existing live worker must finish managing its position before its process is stopped.
+if [[ " ${old_services[*]} " == *" wti-live-worker "* ]]; then
+    if ! "${compose[@]}" exec -T backend python -c '
+from backend.wti.commodity import WTI
+from backend.wti.live_store import LiveStore, live_path
+path = live_path(WTI.directory())
+if not path.is_file():
+    raise SystemExit("The Oil D live journal could not be found.")
+status = LiveStore(path).status()
+if status["active_trade"] is not None:
+    raise SystemExit("Oil D has an active position or order.")
+if status.get("worker_configured") and status.get("entries_configured") and not status["paused"]:
+    raise SystemExit("Oil D live entries are enabled.")
+'; then
+        echo 'Update blocked before stopping services. Use /oil-live off, then wait for /oil-live status to show no active position or order. Retry the update when the live journal can be checked.' >&2
+        exit 1
+    fi
+fi
+
 echo 'Pausing services for a consistent backup of the databases and prediction files...'
 stopped=true
 "${compose[@]}" stop --timeout 60
@@ -172,12 +192,24 @@ else: raise SystemExit("Model calibration is not ready; inspect backend logs and
 fi
 "${compose[@]}" exec -T backend python -c 'from backend.trading.inputs import load_uncertainty, uncertainty_profiles_current; p=load_uncertainty(); assert uncertainty_profiles_current() and ("GB","moneyline") in p and ("MC","moneyline") in p, "Required current uncertainty profiles missing"'
 "${compose[@]}" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 900 paper-worker
-"${compose[@]}" exec -T bot python -c 'import asyncio; from bot.api import PredictionAPI
+"${compose[@]}" exec -T bot python -c 'import asyncio; from decimal import Decimal; from bot.api import PredictionAPI
 async def check():
     api=PredictionAPI("http://backend:8000")
     try:
         await api.paper_outbox()
-        print("Paper operator authentication verified.")
+        await api.oil_live("/status")
+        live = await api.oil_live("/events", after=0, limit=1)
+        assert isinstance(live["events"], list) and isinstance(live["latest_id"], int)
+        chart = await api.oil_live("/chart", time="24h")
+        assert isinstance(chart["available"], bool)
+        paper_test = await api.oil_paper_test("/status")
+        assert paper_test["mode"] == "PAPER_ONLY" and Decimal(paper_test["starting_budget"]) == 100
+        assert Decimal(paper_test["entry_cap"]) == 10 and Decimal(paper_test["loss_cap"]) == 20
+        paper_events = await api.oil_paper_test("/events", after=0, limit=1)
+        assert isinstance(paper_events["events"], list) and isinstance(paper_events["latest_id"], int)
+        paper_chart = await api.oil_paper_test("/chart", time="24h")
+        assert isinstance(paper_chart["available"], bool)
+        print("Operator authentication, Oil D event feeds, and both P&L charts verified.")
     finally: await api.close()
 asyncio.run(check())'
 curl -fsS http://127.0.0.1:8000/api/crypto/account > /dev/null
@@ -188,7 +220,9 @@ curl -fsS http://127.0.0.1:8000/api/wti/models > /dev/null
 curl -fsS http://127.0.0.1:8000/api/natgas/models > /dev/null
 curl -fsS http://127.0.0.1:8000/api/paper/parlay > /dev/null
 "${compose[@]}" exec -T backend python -c 'import json, urllib.request; paths = json.load(urllib.request.urlopen("http://127.0.0.1:8000/openapi.json", timeout=10))["paths"]; assert {"/api/players/projection", "/api/players/picks", "/api/graphs/team-points"} <= paths.keys()'
-"${compose[@]}" ps
 curl -fsS http://127.0.0.1:8000/healthz
+"${compose[@]}" up -d --no-build --no-deps --force-recreate --wait --wait-timeout 90 wti-live-worker
+"${compose[@]}" ps
 printf '\nUpdate complete. Backup: %s\n' "$backup"
 echo 'In Discord, try /player-stats and /pygraph, and use /paper-channels set to choose the player picks channel.'
+echo 'For Oil D live setup and status, see docs/OIL_LIVE.md and /oil-live status.'

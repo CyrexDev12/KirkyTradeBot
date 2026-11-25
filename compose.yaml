@@ -1,4 +1,6 @@
 name: nfl-fair-value
+x-polymarket-public: &polymarket-public
+  NFL_VENUE_BUDGET_DB: /data/venue-rate-budget.sqlite3
 services:
   backend:
     image: nfl-fair-value-backend:latest
@@ -9,6 +11,7 @@ services:
     init: true
     restart: unless-stopped
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
       NFL_SCHEDULE_CACHE_MINUTES: "15"
       NFL_PAPER_DB: /data/trading/paper_trading.sqlite3
@@ -74,6 +77,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
       NFL_PAPER_DB: /data/trading/paper_trading.sqlite3
       NFL_SCHEDULE_CACHE_MINUTES: "15"
@@ -124,6 +128,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
     volumes:
       - predictions:/data
@@ -148,6 +153,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
     volumes:
       - predictions:/data
@@ -172,6 +178,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
     volumes:
       - predictions:/data
@@ -181,6 +188,36 @@ services:
       timeout: 10s
       retries: 3
       start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  wti-live-worker:
+    image: nfl-fair-value-backend:latest
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "backend.wti.live_worker"]
+    env_file:
+      - path: ./.secrets/wti-replay.env
+        required: false
+      - path: ./.secrets/wti-live.env
+        required: false
+    depends_on:
+      wti-worker:
+        condition: service_healthy
+    environment:
+      <<: *polymarket-public
+      NFL_DATA_DIR: /data
+    volumes:
+      - predictions:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3,time; db=sqlite3.connect('file:/data/wti/live/live.sqlite3?mode=ro',uri=True); row=db.execute('SELECT heartbeat_at FROM control WHERE id=1').fetchone(); assert row and row[0] is not None and 0 <= time.time()-row[0] < 60"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     logging:
       driver: json-file
       options:
@@ -196,6 +233,7 @@ services:
       backend:
         condition: service_healthy
     environment:
+      <<: *polymarket-public
       NFL_DATA_DIR: /data
     volumes:
       - predictions:/data

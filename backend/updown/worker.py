@@ -52,9 +52,10 @@ class Worker:
     """
 
     def __init__(self, store: Store, feed: Feed, settings: Settings = SETTINGS, clock=time.time,
-                 fair_fn=None, gate=None, pre_exit=None, tag: dict | None = None):
+                 fair_fn=None, gate=None, pre_exit=None, tag: dict | None = None, on_intent=None):
         self.store, self.feed, self.settings, self.clock = store, feed, settings, clock
         self.fair_fn, self.gate, self.pre_exit, self.tag = fair_fn, gate, pre_exit, tag or {}
+        self.on_intent = on_intent
         self.products = {p.key: p for p in settings.products}
         self.windows: dict[tuple, object] = {}
         self.errors: dict[str, str] = {}
@@ -180,10 +181,19 @@ class Worker:
                            yes_ask=book.yes_offers[0][0] if book.yes_offers else None)
         reason = decision.reason
         if decision.action == "BUY":
-            self._entries[key] = EntryIntent(window, decision, self.clock(), {
+            decided_at = self.clock()
+            self._entries[key] = EntryIntent(window, decision, decided_at, {
                 "index_price": index_price, "coinbase_price": coinbase, "coinbase_product": product.coinbase,
                 "sigma_per_second": sigma, "rule": window.rule,
                 **self.tag})
+            if self.on_intent:
+                self.on_intent(key, window.slug, decided_at, {
+                    "action": "buy", "side": decision.side, "quantity": decision.quantity,
+                    "limit": decision.fills[-1][0], "budget": decision.cost, "fair_up": decision.fair_up,
+                    "min_edge": self.settings.min_edge, "theta": window.theta,
+                    "ready_at": decided_at + self.settings.execution_latency_seconds,
+                    "deadline": window.end - self.settings.entry_before_end_seconds,
+                })
             reason = "buy signaled; waiting for an execution quote"
         self.store.note_window(key, start, reason, now, window.price_to_beat)
 
@@ -282,7 +292,25 @@ class Worker:
             decision = (self.pre_exit(trade, available, now, p_up) if self.pre_exit else None) or \
                 early_exit(trade["side"], trade["remaining"], available, p_up, trade["theta"], self.settings)
         if decision:
-            self._exits[trade["id"]] = ExitIntent(decision, self.clock())
+            decided_at = self.clock()
+            self._exits[trade["id"]] = ExitIntent(decision, decided_at)
+            if self.on_intent:
+                kind, quantity, limit = self._exit_terms(trade, decision)
+                self.on_intent(trade["key"], trade["market_slug"], decided_at, {
+                    "action": "sell", "side": trade["side"], "quantity": quantity,
+                    "limit": limit, "exit_kind": kind, "theta": trade["theta"],
+                    "ready_at": decided_at + self.settings.execution_latency_seconds,
+                    "deadline": trade["window_end_ts"],
+                })
+
+    @staticmethod
+    def _exit_terms(trade, signal):
+        kind = signal.get("kind", "take_profit")
+        if kind == "target":
+            return kind, trade["remaining"], trade["take_profit_price"]
+        if kind == "stop_loss":
+            return kind, trade["remaining"], 0.0
+        return kind, signal["quantity"], signal["fills"][-1][0]
 
     async def _execute_exit(self, trade, intent, ready_at):
         end = trade["window_end_ts"]
@@ -293,11 +321,7 @@ class Worker:
         if available is None:
             return
         signal = intent.decision
-        kind = signal.get("kind", "take_profit")
-        quantity, limit = signal["quantity"], signal["fills"][-1][0]
-        if kind in ("target", "stop_loss"):
-            quantity = trade["remaining"]
-            limit = trade["take_profit_price"] if kind == "target" else 0.0
+        kind, quantity, limit = self._exit_terms(trade, signal)
         fill = match_exit(trade, available, quantity, limit, kind, self.settings)
         now = self.clock()
         if fill and now < end:

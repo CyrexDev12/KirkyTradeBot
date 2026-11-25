@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import math
 import time
 
@@ -55,6 +56,16 @@ def _value(obj):
     return None
 
 
+def _market_increment(raw, *, price=False):
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    if value.is_finite() and value > 0 and (not price or value < 1):
+        return str(value)
+    return None
+
+
 def parse_window(asset: str, payload: dict, default_theta: float = 0.095, rule: str = "avg60") -> Window:
     try:
         market = payload["events"][0]["markets"][0]
@@ -66,7 +77,9 @@ def parse_window(asset: str, payload: dict, default_theta: float = 0.095, rule: 
     return Window(asset=asset, slug=market["slug"], start=_ts(terms["windowStart"]), end=_ts(terms["windowEnd"]),
                   price_to_beat=_value(terms.get("priceToBeat")), status=market.get("status", ""),
                   theta=float(market.get("feeCoefficient") or default_theta),
-                  horizon=terms.get("horizon") or "15m", rule=rule)
+                  horizon=terms.get("horizon") or "15m", rule=rule,
+                  minimum_quantity=_market_increment(market.get("minimumTradeQty")),
+                  price_tick=_market_increment(market.get("orderPriceMinTickSize"), price=True))
 
 
 def settlement_price(payload: dict) -> tuple[str, float | None]:
@@ -208,8 +221,13 @@ class Feed:
         return Settlement(window.slug, payout, ptb if ptb is not None and math.isfinite(ptb) else None, price)
 
     async def book(self, slug: str) -> Book:
-        requested_at = self.clock()
-        payload = await self.venue.get(f"/v1/markets/{slug}/book")
+        path = f"/v1/markets/{slug}/book"
+        timed_get = getattr(self.venue, "get_with_dispatch_time", None)
+        if timed_get is None:
+            requested_at = self.clock()
+            payload = await self.venue.get(path)
+        else:
+            payload, requested_at = await timed_get(path, self.clock)
         return parse_book(payload, self.clock(), requested_at=requested_at, slug=slug)
 
     async def _history(self, index_ids, bucket: str, start: int):

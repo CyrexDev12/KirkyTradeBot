@@ -56,3 +56,31 @@ Unpack it with `tar -xzf nfl-data-<time>.tar.gz`.
 - **Nothing left behind.** The uploaded scripts are removed from the VM, along with the VM copy unless you pass `--keep-on-vm`.
 
 Treat the archive as private: it contains your paper-account history and Discord server and channel IDs.
+
+## Oil D paper trades
+
+Use `--only oil-d-paper` to export every retained 15-minute and 1-hour Oil D paper trade. The exporter reads a consistent snapshot of Model D's paper database. It includes both closed and open trades. P&L stays blank for open trades.
+
+```bash
+bash deploy/azure/export.sh 25328a62-e79b-4f1e-aaf3-d94e1554430b --only oil-d-paper
+```
+
+The archive contains `oil-d-15m.csv`, `oil-d-1h.csv`, `oil-d-summary.csv`, and a checksum manifest. The trade CSVs list newest windows first and include the side, quantity, fills, fees, entry and exit times, and model probabilities. Older trades can have blank book timestamps and fill details. Prices and probabilities use decimals, so `0.64` is 64¢ for a contract price or 64% for a probability. The summary reports wins, losses, breakeven results, and total realized net P&L for each horizon.
+
+## Oil D live and WebSocket shadow comparison
+
+```bash
+bash deploy/azure/export.sh 25328a62-e79b-4f1e-aaf3-d94e1554430b --only oil-d-live-shadow
+```
+
+This mode snapshots the live and WebSocket shadow journals while both workers keep running. The export contains five CSVs.
+
+| File | Contents |
+|---|---|
+| `oil-d-live-trades.csv` | Reconciled entry orders, exchange fill details, realized P&L, and fee accuracy when recorded |
+| `oil-d-live-attempts.csv` | Live entry checks and skip reasons, including attempts that never prepared an order |
+| `oil-d-shadow-entries.csv` | Shadow signals and simulated entries |
+| `oil-d-live-shadow-comparison.csv` | One row per live WebSocket entry order, with the closest eligible shadow signal or an unmatched reason |
+| `oil-d-live-shadow-summary.csv` | Order and fill counts, match coverage, and the average price difference where both entries filled |
+
+Pairs require the same 15-minute contract and side with signal times within 15 seconds. The exporter prefers matching signal-book receipt and exchange timestamps and labels those rows separately. Each shadow signal can match once. A positive `live_minus_shadow_price_cents` means the live order paid more per contract. The shadow journal records entries only, so realized P&L comes from the live ledger.

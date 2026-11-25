@@ -186,7 +186,7 @@ def _planner(store, cfg):
     from .inputs import LiveInputs
     from .planner import WeeklyPlanner
     from .venue import ReadOnlyVenueClient
-    venue = ReadOnlyVenueClient(min_interval=float(cfg.min_request_interval_seconds))
+    venue = ReadOnlyVenueClient(min_interval=float(cfg.min_request_interval_seconds), priority="nfl_paper")
     return WeeklyPlanner(store, cfg, LiveInputs(venue, store)), venue
 
 

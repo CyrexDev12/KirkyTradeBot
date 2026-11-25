@@ -10,8 +10,9 @@ import time
 import httpx
 
 from .data import canonical
+from .trading.request_budget import RequestBudget, retry_after_seconds
+from .trading.venue import BASE, acquire_public_slot, record_public_throttle
 
-BASE = "https://gateway.polymarket.us"
 _cache: dict[tuple, tuple[float, dict]] = {}
 _book_cache: dict[str, tuple[float, dict]] = {}
 _event_cache: tuple[float, list[dict]] | None = None
@@ -176,6 +177,7 @@ def valuation(prob: float | None, quote: dict | None, quantity: float = 100) -> 
 
 async def _get(client: httpx.AsyncClient, path: str, params=None) -> dict:
     global _next_request
+    budget = RequestBudget.from_env()
     for attempt in range(2):
         # Spread reads across time; a burst of book requests can hit the
         # provider's per-IP limit even when the one-second average is low.
@@ -184,9 +186,12 @@ async def _get(client: httpx.AsyncClient, path: str, params=None) -> dict:
             if wait:
                 await asyncio.sleep(wait)
             _next_request = time.monotonic() + 0.6
+        await acquire_public_slot(budget)
         response = await client.get(BASE + path, params=params)
         if response.status_code == 429:
-            await asyncio.sleep(1)
+            await record_public_throttle(budget, response)
+            if attempt == 0 and budget is None:
+                await asyncio.sleep(retry_after_seconds(response.headers.get("retry-after"), time.time()) or 1)
             continue
         response.raise_for_status()
         return response.json()

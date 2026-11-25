@@ -2,45 +2,88 @@
 
 The existing VM is `nfl-fair-value` in resource group `nfl-fair-value-rg`, subscription `25328a62-e79b-4f1e-aaf3-d94e1554430b`, region **Mexico Central**. Update it with `update.sh`. The updater discovers its actual region and size and does not deploy the Bicep template or replace the VM.
 
-This release updates simulated execution for crypto Up/Down, gold, WTI and natural gas. The shared engine checks a fresh book after order latency, remembers consumed depth, stops executing at the window close, and waits for the official contract payout. Old closed paper trades retain their original records.
+This release gives the independent [$100 Oil D execution paper account](../docs/OIL_LIVE.md#oil-d-15-minute-execution-paper-account) a $10 entry cap and a $20 realized loss limit. Existing account history and Discord routing carry forward.
+
+## Optional replay of earlier live orders
+
+Upload `.deploy/nfl-oil-d-order-replay.zip` and your saved `nfl-update-key` in Bash Cloud Shell. The replay reads the existing worker’s live journal and WTI tape. It can run while the current application is online.
+
+```bash
+(
+  set -euo pipefail
+  replay_dir="$(mktemp -d)"
+  unzip -q "$HOME/nfl-oil-d-order-replay.zip" -d "$replay_dir"
+  bash "$replay_dir/deploy/azure/replay-oil-d-orders.sh" \
+    25328a62-e79b-4f1e-aaf3-d94e1554430b "$replay_dir/oil-d-order-replay.pyz" \
+    --since 2026-11-25T07:00:00Z --until 2026-11-25T19:15:00Z \
+    --trade-ids "$(seq -s, 2 30)"
+)
+```
+
+This selects the earlier 28 filled entry orders plus the zero-fill order. The report compares recorded and modeled fill counts, contract quantity, price error, and fees. It flags missing evidence and labels resting target fill estimates. Use `--hours 24` instead of the three cohort options to replay recent orders.
 
 ## Upload and start the update
 
-1. Use the prepared `.deploy/nfl-updown-execution-hotfix-azure.zip`, or build it on your computer from the updated project. On macOS or Linux:
+1. Use the prepared `.deploy/nfl-oil-d-paper-limits-azure.zip`, or build it on your computer from the updated project. On macOS or Linux, run:
 
    ```bash
-   python3 deploy/package.py --output .deploy/nfl-updown-execution-hotfix-azure.zip
+   python3 deploy/package.py --output .deploy/nfl-oil-d-paper-limits-azure.zip
    ```
 
    On Windows PowerShell:
 
    ```powershell
-   .\.venv\Scripts\python deploy/package.py --output .deploy/nfl-updown-execution-hotfix-azure.zip
+   python deploy/package.py --output .deploy/nfl-oil-d-paper-limits-azure.zip
    ```
 
-2. Open **Bash** Cloud Shell. Upload `nfl-updown-execution-hotfix-azure.zip` using **Manage files → Upload**. Extract it into a fresh source directory.
+2. Run `/oil-live off` in Discord and wait for `/oil-live status` to show no active order or position.
+
+3. Open **Bash** Cloud Shell. Upload `nfl-oil-d-paper-limits-azure.zip` and your saved `nfl-update-key` file using **Manage files → Upload**. An ephemeral Cloud Shell discards uploaded files when the session ends. If the private key is lost, use the recovery steps below.
+
+4. Run the update with real-money entries paused. The paper account will be eligible to open simulated positions during that pause.
 
    ```bash
-   nfl_update_dir="$(mktemp -d "$HOME/nfl-update.XXXXXX")"
-   unzip -q "$HOME/nfl-updown-execution-hotfix-azure.zip" -d "$nfl_update_dir"
-   cd "$nfl_update_dir"
+   (
+     set -euo pipefail
+     sub="25328a62-e79b-4f1e-aaf3-d94e1554430b"
+     key_file="${NFL_SSH_KEY:-$HOME/nfl-update-key}"
+     [[ -f "$key_file" ]] || key_file="$HOME/.ssh/nfl-update-key"
+     chmod 600 "$key_file"
+     release_dir="$(mktemp -d)"
+     unzip -q "$HOME/nfl-oil-d-paper-limits-azure.zip" -d "$release_dir"
+     cd "$release_dir"
+     NFL_SSH_KEY="$key_file" bash deploy/azure/update.sh "$sub"
+   )
    ```
 
-3. The updater needs the SSH private key from the original VM deployment. If `~/.ssh/nfl-discord` still exists, it uses that file. If you downloaded the key before closing the old Cloud Shell, rename your local saved copy to `nfl-discord-key`, upload it, then run:
+5. After **Update complete**, run `/oilpaperlivetest status` and check for the $10 entry cap and $20 realized loss limit. Use these commands to choose a channel or inspect the chart:
+
+   ```text
+   /oilpaperlivetestchannel channel:#oil-paper-live-test
+   /oilpaperlivetest graph time:24h
+   ```
+
+6. To resume the existing live pilot, verify its budget and fresh heartbeat in `/oil-live status` and run the resume command in Bash Cloud Shell. Resuming halts new simulated entries while the paper account finishes any existing position.
 
    ```bash
-   chmod 600 "$HOME/nfl-discord-key"
-   export NFL_SSH_KEY="$HOME/nfl-discord-key"
+   az vm run-command invoke \
+     --subscription 25328a62-e79b-4f1e-aaf3-d94e1554430b \
+     --resource-group nfl-fair-value-rg --name nfl-fair-value \
+     --command-id RunShellScript \
+     --scripts 'cd /home/azureuser/nfl-fair-value && docker compose exec -T wti-live-worker python -m backend.wti.live_worker --resume-operator-pause' \
+     --query 'value[].message' -o tsv
    ```
 
-   Keep the private key private. An ephemeral Cloud Shell does not retain files from an ended session. If the original key is lost, see the recovery instructions below before running the update.
+Check the new execution paper account from any Bash Cloud Shell session:
 
-4. Start the update:
-
-   ```bash
-   if [[ -z "${NFL_SSH_KEY:-}" && -f "$HOME/.ssh/nfl-update-key" ]]; then export NFL_SSH_KEY="$HOME/.ssh/nfl-update-key"; fi
-   bash deploy/azure/update.sh 25328a62-e79b-4f1e-aaf3-d94e1554430b
-   ```
+```bash
+az vm run-command invoke \
+  --subscription 25328a62-e79b-4f1e-aaf3-d94e1554430b \
+  --resource-group nfl-fair-value-rg --name nfl-fair-value \
+  --command-id RunShellScript \
+  --scripts 'cd /home/azureuser/nfl-fair-value && docker compose exec -T wti-live-worker python -m backend.wti.oil_d_paper --hours 24' \
+  --query 'value[].message' -o tsv
+```
 
 The script refreshes the existing `AdministratorSSH` rule to allow this Cloud Shell's current public IPv4 address, uploads the source, and starts a detached update job on the VM. Its progress streams into your terminal. The job continues if Cloud Shell disconnects. Keep your SSH key so you can reconnect later. If SSH already works and you need to retain the current rule, append `--skip-ssh-rule`.
 
@@ -50,10 +93,11 @@ You do not need to enter or reset the Discord token. The updater reads the exist
 
 - The source archive includes a SHA-256 manifest and LF endings for shell scripts. After extraction, source directories receive mode `0755` so the container's nonroot user can read nested packages. Private staging directories and secrets keep their restricted permissions. It excludes local credentials, cached data, and virtual environments.
 - New images build while the old services remain online. Before stopping them, the updater checks imports, initializes the WTI and natural gas desks with their default settings on disposable storage, and verifies that the Discord image can render a graph without a display.
+- If an Oil D live worker is already installed, the updater checks that it has paused new entries and resolved any active trade before stopping services. See [how to pause the pilot](../docs/OIL_LIVE.md#pausing-and-updating).
 - The updater stops the old services briefly to create consistent compressed backups of both named volumes, including SQLite journals, paper-account data, predictions, and Discord delivery records. Backup time depends on data size.
 - Application source and containers are replaced while the `.env` file, `.secrets` directory, `nfl-fair-value_predictions` volume, and `nfl-fair-value_bot-state` volume are retained. Existing forecasts, channel settings, alert history, and paper balances are not reset.
 - The backend and bot return first. A new model version triggers an immediate gradient model rebuild and versioned paper-model calibration. The updater waits for the current winner calibration and builds current gradient and Monte Carlo uncertainty profiles before starting the paper worker. This step can take several minutes. Prior forecasts and calibration artifacts stay available to the previous release during recovery.
-- All eight services must become healthy. The updater verifies bot authentication, the BTC, Up/Down, Gold, WTI, natural gas, and parlay API routes, and registration of the player forecast, weekly picks, and graph endpoints.
+- The eight existing services must become healthy. The updater verifies bot authentication, the BTC, Up/Down, Gold, WTI, natural gas, and parlay API routes, and registration of the player forecast, weekly picks, and graph endpoints. It checks the authenticated live status endpoint before starting `wti-live-worker`.
 - If activation fails, the updater attempts to restore the old source and saved image versions automatically. It retains live data; it does not roll back Discord delivery history or erase new paper-ledger records. Data backups remain available for manual recovery. Database changes in this release are additive. Future incompatible schema migrations require a separate recovery plan.
 
 Backups are under `~/nfl-backups/<release-id>` on the VM, with private directory permissions. Keep enough free disk space for the new images, a copy of both data volumes, and the previous release. Old images and backups are retained rather than deleted automatically. A backup on the same VM protects an application update; copy it off the VM if you need recovery from disk or VM loss.
@@ -62,7 +106,7 @@ Docker volumes persist independently of containers. Avoid `docker compose down -
 
 ## Verify and configure Discord
 
-The last container table should show `backend`, `bot`, `paper-worker`, `crypto-worker`, `updown-worker`, `gold-worker`, `wti-worker`, and `natgas-worker` as **healthy**, followed by `Update complete`.
+The last container table should show `backend`, `bot`, `paper-worker`, `crypto-worker`, `updown-worker`, `gold-worker`, `wti-worker`, and `natgas-worker` as **healthy** and `wti-live-worker` as running, followed by `Update complete`.
 
 In Discord, run:
 

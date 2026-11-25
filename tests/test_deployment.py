@@ -92,6 +92,9 @@ elif args[0] == 'compose':
         if 'backend.trading.cli' in options and failure == 'profiles': sys.exit(21)
         if 'bot' in options:
             assert 'api.paper_outbox()' in options[-1], 'Operator health check must send authentication'
+            assert 'api.oil_live("/chart", time="24h")' in options[-1], 'Deployment must verify the live chart endpoint'
+            for endpoint in ('"/status"', '"/events", after=0, limit=1', '"/chart", time="24h"'):
+                assert f'api.oil_paper_test({endpoint})' in options[-1], 'Deployment must verify the paper account endpoints'
 else: raise SystemExit('Unexpected Docker command: ' + repr(args))
 '''
 

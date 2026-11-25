@@ -25,6 +25,8 @@ from .updown.api import router as updown_router
 from .gold.api import router as gold_router
 from .tracker.api import router as tracker_router
 from .wti.api import router as wti_router
+from .wti.live_api import router as wti_live_router
+from .wti.oil_d_paper_api import router as wti_execution_paper_router
 from .natgas.api import router as natgas_router
 from .player_api import router as player_router
 from .team_graph import router as team_graph_router
@@ -47,6 +49,9 @@ app.include_router(gold_router)
 app.include_router(player_router)
 app.include_router(team_graph_router)
 app.include_router(tracker_router)
+# Register operator paths before WTI's /{model_id}/events route.
+app.include_router(wti_live_router)
+app.include_router(wti_execution_paper_router)
 app.include_router(wti_router)
 app.include_router(natgas_router)
 logger = logging.getLogger(__name__)

@@ -240,6 +240,16 @@ class Store:
                        (spec.market_slug, spec.selected_outcome, spec.game_id, spec.season, spec.week,
                         spec.market_type, dumps(spec.to_dict()), iso(now)))
 
+    def contract_kickoffs(self, slugs: set[str]) -> dict[str, str]:
+        if not slugs:
+            return {}
+        placeholders = ",".join("?" for _ in slugs)
+        with closing(self.connect()) as db:
+            rows = db.execute("SELECT market_slug, MAX(json_extract(payload, '$.kickoff')) AS kickoff "
+                              f"FROM market_contracts WHERE market_slug IN ({placeholders}) GROUP BY market_slug",
+                              tuple(slugs))
+            return {slug: kickoff for slug, kickoff in rows if kickoff}
+
     # ------------------------------------------------------------ plans/jobs
     def weekly_plan(self, plan_key: str) -> dict | None:
         with closing(self.connect()) as db:

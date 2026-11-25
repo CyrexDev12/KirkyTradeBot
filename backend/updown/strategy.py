@@ -166,6 +166,8 @@ class Window:
     theta: float
     horizon: str = "15m"
     rule: str = "avg60"
+    minimum_quantity: str | None = None
+    price_tick: str | None = None
 
     @property
     def key(self) -> str:

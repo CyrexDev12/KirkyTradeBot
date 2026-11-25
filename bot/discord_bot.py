@@ -21,6 +21,8 @@ from .paper import PaperPosts, PaperPublisher, PaperTransport, register_paper_co
 from .player_stats import PlayerPicksPublisher, register_player_commands
 from .tracker import ChiefPublisher, register_chief_commands
 from .oil import GAS, EnergyPublisher, OilPublisher, register_gas_commands, register_oil_commands
+from .oil_live import OilLivePermissionRequired, OilLivePublisher, register_oil_live_commands
+from .oil_paper_test import OilPaperTestPublisher, register_oil_paper_test_commands
 from .scheduler import AlertScheduler, utcnow
 from .storage import Store
 
@@ -81,7 +83,9 @@ class MatchupView(discord.ui.View):
 async def report_error(interaction, error):
     logger.warning("Discord interaction failed (%s)", type(error).__name__)
     text = "Predictions are temporarily unavailable. Try again shortly or check /botstatus."
-    if isinstance(error, app_commands.CheckFailure):
+    if isinstance(error, OilLivePermissionRequired):
+        text = str(error)
+    elif isinstance(error, app_commands.CheckFailure):
         text = "This command requires the Manage Server permission."
     if interaction.response.is_done():
         await interaction.followup.send(text, ephemeral=True)
@@ -104,6 +108,8 @@ class NFLBot(discord.Client):
         self.player_publisher = PlayerPicksPublisher(api, self.paper_posts, self.paper_publisher)
         self.chief_publisher = ChiefPublisher(api, self.paper_posts, self.paper_publisher)
         self.oil_publisher = OilPublisher(api, self.paper_posts, self.paper_publisher)
+        self.oil_live_publisher = OilLivePublisher(api, self.paper_posts, self.paper_publisher, guild_id)
+        self.oil_paper_test_publisher = OilPaperTestPublisher(api, self.paper_posts, self.paper_publisher, guild_id)
         self.gas_publisher = EnergyPublisher(api, self.paper_posts, self.paper_publisher, GAS)
         self.tree.on_error = report_error
         self.register_commands()
@@ -114,6 +120,8 @@ class NFLBot(discord.Client):
         register_player_commands(self)
         register_chief_commands(self)
         register_oil_commands(self)
+        register_oil_live_commands(self)
+        register_oil_paper_test_commands(self)
         register_gas_commands(self)
 
     async def setup_hook(self):
@@ -125,11 +133,15 @@ class NFLBot(discord.Client):
             await self.tree.sync()
         self.post_alerts.start()
         self.post_crypto.start()
+        self.post_oil_live.start()
+        self.post_oil_paper_test.start()
         self.post_player_picks.start()
 
     async def close(self):
         self.post_alerts.cancel()
         self.post_crypto.cancel()
+        self.post_oil_live.cancel()
+        self.post_oil_paper_test.cancel()
         self.post_player_picks.cancel()
         await self.api.close()
         await super().close()
@@ -164,6 +176,22 @@ class NFLBot(discord.Client):
             await self.oil_publisher.tick()
             await self.gas_publisher.tick()
             await self.chief_publisher.tick()
+
+    @tasks.loop(seconds=10)
+    async def post_oil_live(self):
+        if self.is_ready():
+            try:
+                await self.oil_live_publisher.tick()
+            except Exception as exc:
+                logger.warning("Oil D live update poll failed (%s)", type(exc).__name__)
+
+    @tasks.loop(seconds=15)
+    async def post_oil_paper_test(self):
+        if self.is_ready():
+            try:
+                await self.oil_paper_test_publisher.tick()
+            except Exception as exc:
+                logger.warning("Oil D paper test update poll failed (%s)", type(exc).__name__)
 
     @tasks.loop(minutes=15)
     async def post_player_picks(self):
@@ -254,6 +282,8 @@ class NFLBot(discord.Client):
                 "/pygraph for team scoring or player yardage history with a CSV.\n"
                 "🛢️ **Oil desk** · /oil leaderboard compares five WTI models; /oil picks, results, account, "
                 "stats, info (channel: /paper-channels set oil).\n"
+                "🔴 **Oil D live** · Administrators can use /oil-live chart, channel, status, or off.\n"
+                "**Oil D paper test** · /oilpaperlivetest graph or status. Route fills with /oilpaperlivetestchannel.\n"
                 "🔥 **Gas desk** · /gas leaderboard, picks, results, account, stats, info "
                 "(channel: /paper-channels set gas).\n"
                 "🎖️ **Chief Beef Kirkey** · /chiefkirkey status, trades, bot, fullroster, alerts track every "

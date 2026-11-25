@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -55,6 +56,12 @@ class PaperPosts:
                 CREATE TABLE IF NOT EXISTS gold_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS oil_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS oil_info_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS oil_live_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS oil_paper_test_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS oil_paper_test_notices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+                    health TEXT NOT NULL, payload TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
+                CREATE INDEX IF NOT EXISTS oil_paper_test_notices_guild ON oil_paper_test_notices(guild_id,id);
                 CREATE TABLE IF NOT EXISTS gas_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS gas_info_cursors (guild_id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL);
             """)
@@ -96,8 +103,40 @@ class PaperPosts:
                 "SELECT guild_id, channel_id, event_id FROM paper_channels JOIN crypto_cursors USING (guild_id) "
                 "WHERE kind='crypto'")]
 
+    def configure_oil_live(self, guild_id, channel_id, latest_event_id):
+        with closing(self.connect()) as db, db:
+            db.execute("INSERT OR REPLACE INTO paper_channels VALUES (?,'oil-live',?)", (guild_id, channel_id))
+            db.execute("INSERT OR IGNORE INTO oil_live_cursors VALUES (?,?)", (guild_id, latest_event_id))
+
+    def observe_oil_paper_test(self, guild_id, channel_id, health, card, *, subscribe_after=None):
+        """Queue a snapshot on setup or heartbeat availability changes. Worker events record entry-gate changes."""
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if subscribe_after is not None:
+                db.execute("INSERT OR REPLACE INTO paper_channels VALUES (?,'oil-paper-test',?)", (guild_id, channel_id))
+                db.execute("INSERT OR IGNORE INTO oil_paper_test_cursors VALUES (?,?)", (guild_id, subscribe_after))
+                db.execute("DELETE FROM oil_paper_test_notices WHERE guild_id=? AND channel_id<>? AND delivered=0",
+                           (guild_id, channel_id))
+            else:
+                last = db.execute("SELECT health FROM oil_paper_test_notices WHERE guild_id=? ORDER BY id DESC LIMIT 1",
+                                  (guild_id,)).fetchone()
+                if last and last["health"] == health:
+                    return
+            db.execute("INSERT INTO oil_paper_test_notices(guild_id,channel_id,health,payload) VALUES(?,?,?,?)",
+                       (guild_id, channel_id, health, json.dumps(card)))
+
+    def oil_paper_test_notices(self, guild_id, channel_id):
+        with closing(self.connect()) as db:
+            return [(r["id"], json.loads(r["payload"])) for r in db.execute(
+                "SELECT id,payload FROM oil_paper_test_notices WHERE guild_id=? AND channel_id=? AND delivered=0 ORDER BY id",
+                (guild_id, channel_id))]
+
+    def finish_oil_paper_test_notice(self, notice_id):
+        with closing(self.connect()) as db, db:
+            db.execute("UPDATE oil_paper_test_notices SET delivered=1 WHERE id=?", (notice_id,))
+
     CURSOR_TABLES = ("updown_cursors", "gold_cursors", "oil_cursors", "oil_info_cursors", "gas_cursors",
-                     "gas_info_cursors")
+                     "gas_info_cursors", "oil_live_cursors", "oil_paper_test_cursors")
 
     def desk_routes(self, kind, table):
         """Routes for an Up/Down desk (crypto cards share the crypto channel, gold has its own).
@@ -137,7 +176,7 @@ class PaperPosts:
         with closing(self.connect()) as db, db:
             db.execute("""INSERT INTO paper_posts (guild_id,publication_id,revision,channel_id,started_at)
                           VALUES (?,?,?,?,?) ON CONFLICT(guild_id,publication_id) DO UPDATE SET
-                          revision=excluded.revision, attempts=paper_posts.attempts+1""",
+                          revision=excluded.revision, attempts=paper_posts.attempts+1, channel_id=excluded.channel_id""",
                        (guild_id, publication_id, revision, channel_id, now.isoformat()))
         return self.post(guild_id, publication_id)
 
@@ -281,6 +320,16 @@ def account_text(a: dict) -> str:
     return "\n".join(lines)[:1900]
 
 
+def channel_issue(interaction, channel):
+    if channel.guild.id != interaction.guild_id:
+        return "Choose a text channel in this server."
+    perms = channel.permissions_for(interaction.guild.me)
+    missing = [n.replace("_", " ") for n in ("view_channel", "send_messages", "embed_links", "read_message_history")
+               if not getattr(perms, n)]
+    if missing:
+        return f"To post in {channel.mention}, I need " + ", ".join(missing) + "."
+
+
 def register_paper_commands(bot, posts: PaperPosts):
     tree, api = bot.tree, bot.api
 
@@ -409,15 +458,6 @@ def register_paper_commands(bot, posts: PaperPosts):
 
     group = app_commands.Group(name="paper-channels", description="Choose where paper picks and updates are posted",
                                guild_only=True, default_permissions=discord.Permissions(manage_guild=True))
-
-    def channel_issue(interaction, channel):
-        if channel.guild.id != interaction.guild_id:
-            return "Choose a text channel in this server."
-        perms = channel.permissions_for(interaction.guild.me)
-        missing = [n.replace("_", " ") for n in ("view_channel", "send_messages", "embed_links", "read_message_history")
-                   if not getattr(perms, n)]
-        if missing:
-            return f"To post in {channel.mention}, I need " + ", ".join(missing) + "."
 
     @group.command(name="setup", description="Pick the channels for BTC trades and the weekly NFL parlay board")
     @app_commands.checks.has_permissions(manage_guild=True)

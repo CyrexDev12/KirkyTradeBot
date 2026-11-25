@@ -73,6 +73,22 @@ class PredictionAPI:
         response.raise_for_status()
         return response.json()
 
+    async def oil_live(self, path, *, body=None, **params):
+        url = "/api/wti/live" + path
+        headers = self._operator_headers()
+        if body is None:
+            response = await self.client.get(url, params=params, headers=headers)
+        else:
+            response = await self.client.post(url, json=body, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    async def oil_paper_test(self, path, **params):
+        response = await self.client.get("/api/wti/paper-execution" + path,
+                                         headers=self._operator_headers(), params=params)
+        response.raise_for_status()
+        return response.json()
+
     async def paper_outbox(self, channels=None):
         params = [("channels", channel) for channel in (channels or [])]
         if channels and "parlay" in channels:

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timedelta, timezone
 from io import BytesIO, StringIO
 from threading import Lock
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator, StrMethodFormatter
 
 
 _render_lock = Lock()
@@ -28,6 +31,38 @@ def _png(figure):
     FigureCanvasAgg(figure).print_png(output)
     output.seek(0)
     return output
+
+
+def oil_live_graph(payload, *, title="Oil D live · realized performance"):
+    phoenix = timezone(-timedelta(hours=7), "MST")
+    times = [datetime.fromisoformat(p["at"]).astimezone(phoenix) for p in payload["points"]]
+    balances = [float(p["balance"]) for p in payload["points"]]
+    budget = float(payload["starting_budget"])
+    with _render_lock:
+        figure = Figure(figsize=(9.2, 4.8), dpi=135, layout="constrained")
+        axis = figure.subplots()
+        axis.axhline(budget, color="#84919c", linewidth=1.2, linestyle="--", label="Initial budget")
+        axis.step(times, balances, where="post", color=OBSERVED, linewidth=2, label="Realized balance")
+        axis.scatter(times[1:-1], balances[1:-1], color=OBSERVED, s=17, zorder=3)
+        axis.set_xlim(times[0], max(times[-1], times[0] + timedelta(seconds=1)))
+        ymin, ymax = min(budget, *balances), max(budget, *balances)
+        margin = max(0.02, (ymax - ymin) * 0.15)
+        axis.set_ylim(ymin - margin, ymax + margin)
+        axis.set_ylabel("Realized balance (USD)")
+        axis.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 5, 10]))
+        axis.yaxis.set_major_formatter(StrMethodFormatter("${x:,.2f}"))
+        pnl = axis.secondary_yaxis("right", functions=(lambda v: v - budget, lambda v: v + budget))
+        pnl.set_ylabel("P&L since initial budget (USD)")
+        pnl.set_yticks([round(tick - budget, 6) for tick in axis.get_yticks()])
+        pnl.yaxis.set_major_formatter(StrMethodFormatter("{x:+z,.2f}"))
+        locator = AutoDateLocator(tz=phoenix, minticks=3, maxticks=8)
+        axis.xaxis.set_major_locator(locator)
+        axis.xaxis.set_major_formatter(ConciseDateFormatter(locator, tz=phoenix))
+        axis.set_xlabel("Trade close time · Arizona (MST)")
+        axis.set_title(title, loc="left", fontsize=15)
+        axis.grid(axis="y", alpha=0.2)
+        axis.legend(loc="best", framealpha=0.9)
+        return _png(figure)
 
 
 def _series(axis, observed, adjusted, *, ylabel):

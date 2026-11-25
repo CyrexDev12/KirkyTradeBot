@@ -1,8 +1,10 @@
 .venv/
 data/
+tradingdata/
 __pycache__/
 .pytest_cache/
 *.pyc
 .env
 .secrets/
 .deploy/
+nfl-update-key

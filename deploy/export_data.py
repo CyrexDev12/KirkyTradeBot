@@ -11,6 +11,8 @@ machine against plain directories, which is how the tests use it.
 * Anything that looks like a secret (``.env``, ``.secrets``, token or key
   files) is skipped. The secrets live outside the volumes, but this is a guard.
 * ``--csv`` also writes every SQLite table as CSV under ``csv/``.
+* ``--only oil-d-paper`` writes separate 15-minute and 1-hour Oil D paper trade CSVs and a summary.
+* ``--only oil-d-live-shadow`` exports live fills, shadow entry simulations, and paired comparisons.
 * ``manifest.json`` lists every file with its size and SHA-256, and each
   database's tables with row counts.
 
@@ -21,8 +23,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
+from contextlib import closing
 import csv
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import io
 import json
@@ -36,6 +41,26 @@ SQLITE_SUFFIXES = (".sqlite3", ".sqlite", ".db")
 SKIP_SUFFIXES = ("-wal", "-shm", "-journal", ".tmp")
 SECRET_PARTS = (".secrets", ".env")
 SECRET_WORDS = ("token", "secret", "password", "private_key", "id_rsa")
+OIL_D_PAPER = Path("wti/models/D/paper.sqlite3")
+OIL_D_LIVE = Path("wti/live/live.sqlite3")
+OIL_D_SHADOW = Path("wti/shadow/oil-d.sqlite3")
+OIL_D_SCOPES = {"oil-d-paper", "oil-d-live-shadow"}
+PAIR_SECONDS = 15.0
+OIL_D_TRADE_FIELDS = (
+    "trade_id", "horizon", "status", "side", "market_slug", "window_start_utc", "window_end_utc",
+    "opened_at_utc", "closed_at_utc", "closed_day_mst", "signal_at_utc", "order_ready_at_utc",
+    "quantity", "remaining_quantity", "entry_price", "entry_fee_usd", "entry_cost_usd", "net_proceeds_usd",
+    "net_pnl_usd", "exit_reason", "outcome", "price_to_beat", "settlement_price", "settlement_source",
+    "index_price", "fair_up", "fair_side", "edge", "book_requested_at_utc", "book_received_at_utc",
+    "book_exchange_at_utc", "book_sequence", "entry_fills", "exits",
+)
+PAIR_FIELDS = (
+    "market_slug", "side", "match", "live_signal_at", "shadow_signal_at", "signal_gap_seconds", "live_order_id",
+    "live_order_state", "live_quote_source", "shadow_outcome", "shadow_reason", "live_limit_price",
+    "shadow_limit_price", "live_filled_quantity", "shadow_filled_quantity", "live_fill_price", "shadow_fill_price",
+    "live_minus_shadow_price_cents", "live_minus_shadow_quantity", "live_first_fill_at", "shadow_first_fill_at",
+    "live_entry_fees_usd", "shadow_entry_fees_usd", "live_net_pnl_usd", "live_fees_exact",
+)
 
 
 def is_sqlite(path: Path) -> bool:
@@ -93,6 +118,181 @@ def table_csvs(database: Path):
         db.close()
 
 
+def utc_field(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat() if isinstance(value, (int, float)) else value
+
+
+def oil_d_paper_csvs(database: Path, directory: Path):
+    """Write the requested Oil D horizons from a private SQLite snapshot."""
+    summaries = {}
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        for horizon in ("15m", "1h"):
+            market = f"wti-{horizon}"
+            summary = dict(trades=0, open_trades=0, closed_trades=0, wins=0, losses=0, breakeven=0,
+                           net_pnl_usd=Decimal(0))
+            rows = db.execute("""
+                SELECT id,window_start,status,cost,net_pnl,closed_day,payload FROM trades
+                WHERE asset=? OR (asset='wti' AND
+                    coalesce(nullif(json_extract(payload,'$.key'), 'wti'),
+                             'wti-' || json_extract(payload,'$.horizon'))=?)
+                ORDER BY window_start DESC,id DESC
+            """, (market, market))
+            with (directory / f"oil-d-{horizon}.csv").open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, OIL_D_TRADE_FIELDS, extrasaction="ignore")
+                writer.writeheader()
+                for trade_id, start, status, cost, pnl, closed_day, payload in rows:
+                    trade = json.loads(payload)
+                    closed = status == "CLOSED"
+                    summary["trades"] += 1
+                    if closed:
+                        summary["closed_trades"] += 1
+                        result = Decimal(str(pnl))
+                        summary["net_pnl_usd"] += result
+                        summary["wins" if result > 0 else "losses" if result < 0 else "breakeven"] += 1
+                    elif status == "OPEN":
+                        summary["open_trades"] += 1
+                    writer.writerow({
+                        **trade, "trade_id": trade_id, "horizon": horizon, "status": status,
+                        "window_start_utc": utc_field(start),
+                        "window_end_utc": utc_field(trade.get("window_end") or trade.get("window_end_ts")),
+                        "opened_at_utc": utc_field(trade.get("opened_at")),
+                        "closed_at_utc": utc_field(trade.get("closed_at")),
+                        "closed_day_mst": closed_day,
+                        "signal_at_utc": utc_field(trade.get("signal_at")),
+                        "order_ready_at_utc": utc_field(trade.get("order_ready_at")),
+                        "remaining_quantity": trade.get("remaining"),
+                        "entry_fee_usd": trade.get("entry_fee"), "entry_cost_usd": cost,
+                        "net_proceeds_usd": trade.get("proceeds"), "net_pnl_usd": pnl if closed else None,
+                        "book_requested_at_utc": utc_field(trade.get("book_requested_at")),
+                        "book_received_at_utc": utc_field(trade.get("book_at")),
+                        "book_exchange_at_utc": utc_field(trade.get("book_exchange_at")),
+                        "entry_fills": json.dumps(trade["entry_fills"]) if "entry_fills" in trade else None,
+                        "exits": json.dumps(trade["exits"]) if "exits" in trade else None,
+                    })
+            summary["net_pnl_usd"] = f"{summary['net_pnl_usd']:.6f}"
+            summaries[horizon] = summary
+    with (directory / "oil-d-summary.csv").open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, ("horizon", *summaries["15m"]))
+        writer.writeheader()
+        writer.writerows({"horizon": horizon, **summary} for horizon, summary in summaries.items())
+    return summaries
+
+
+def paired_oil_d_entries(live, shadow):
+    by_contract = defaultdict(list)
+    for candidate in shadow:
+        by_contract[candidate["market_slug"]].append(candidate)
+    used = set()
+    pairs = []
+    for real in sorted(live, key=lambda row: row.get("signal_at") or 0):
+        if real.get("signal_source") != "stream":
+            continue
+        row = {"market_slug": real["market_slug"], "side": real["side"], "live_signal_at": real["signal_at"],
+               "live_order_id": real["order_id"], "live_order_state": real["order_state"],
+               "live_quote_source": real.get("quote_source"), "live_net_pnl_usd": real.get("net_pnl_usd"),
+               "live_fees_exact": real.get("fees_exact")}
+        price_fields = ("limit_price", "filled_quantity", "fill_price", "first_fill_at", "entry_fees_usd")
+        row.update({f"live_{field}": real.get(field) for field in price_fields})
+        candidates = by_contract[real["market_slug"]]
+        same_side = [candidate for candidate in candidates if candidate["side"] == real["side"]]
+        close = [candidate for candidate in same_side if candidate["signal_at"] is not None
+                 and real["signal_at"] is not None
+                 and abs(candidate["signal_at"] - real["signal_at"]) <= PAIR_SECONDS]
+        available = [candidate for candidate in close if (candidate["market_slug"], candidate["signal_at"]) not in used]
+        if not available:
+            row["match"] = ("shadow_already_paired" if close else "outside_signal_window" if same_side else
+                            "different_side" if candidates else "no_shadow_signal_for_contract")
+            pairs.append(row)
+            continue
+
+        def shares_signal_book(candidate):
+            fields = ("signal_book_received_at", "signal_book_exchange_at")
+            return all(real.get(field) is not None and candidate.get(field) == real[field] for field in fields)
+
+        match = min(available, key=lambda candidate: (not shares_signal_book(candidate),
+                    abs(candidate["signal_at"] - real["signal_at"]), candidate["signal_at"]))
+        used.add((match["market_slug"], match["signal_at"]))
+        row.update(match="same_signal_book" if shares_signal_book(match) else "nearby_signal",
+                   shadow_signal_at=match["signal_at"],
+                   signal_gap_seconds=round(match["signal_at"] - real["signal_at"], 6),
+                   shadow_outcome=match.get("outcome"), shadow_reason=match.get("reason"))
+        row.update({f"shadow_{field}": match.get(field) for field in price_fields})
+        if real.get("venue_order_id") and decimal_field(real.get("filled_quantity")) > 0:
+            if decimal_field(match.get("filled_quantity")) > 0:
+                row["live_minus_shadow_quantity"] = (decimal_field(real["filled_quantity"])
+                                                     - decimal_field(match["filled_quantity"]))
+                if real.get("fill_price") is not None and match.get("fill_price") is not None:
+                    row["live_minus_shadow_price_cents"] = 100 * (
+                        decimal_field(real["fill_price"]) - decimal_field(match["fill_price"]))
+        pairs.append(row)
+    return pairs
+
+
+def decimal_field(value):
+    return Decimal(str(value)) if value is not None else Decimal(0)
+
+
+def write_oil_d_csv(path, fields, rows):
+    timestamp_fields = {field for field in fields if field.endswith("_at")
+                        or field in ("window_start", "window_end", "deadline")}
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(f"{field}_utc" if field in timestamp_fields else field for field in fields)
+        for row in rows:
+            writer.writerow(utc_field(row.get(field)) if field in timestamp_fields else row.get(field)
+                            for field in fields)
+
+
+def oil_d_live_shadow_csvs(live_db, shadow_db, directory):
+    if __package__:
+        from .oil_d_live_export import ATTEMPT_FIELDS, LIVE_FIELDS, SHADOW_FIELDS, live_attempt_rows, live_rows, shadow_rows
+    else:
+        from oil_d_live_export import ATTEMPT_FIELDS, LIVE_FIELDS, SHADOW_FIELDS, live_attempt_rows, live_rows, shadow_rows
+
+    live, shadow, attempts = live_rows(live_db), shadow_rows(shadow_db), live_attempt_rows(live_db)
+    pairs = paired_oil_d_entries(live, shadow)
+    native = [row for row in live if row.get("signal_source") == "stream"]
+    matched = Counter(row["match"] for row in pairs)
+    native_confirmed = [row for row in native if row.get("venue_order_id")
+                        and decimal_field(row.get("filled_quantity")) > 0]
+    aligned = [row for row in pairs if row["match"] in ("same_signal_book", "nearby_signal")]
+    confirmed_ids = {row["order_id"] for row in native_confirmed}
+    price_deltas = [row["live_minus_shadow_price_cents"] for row in pairs
+                    if "live_minus_shadow_price_cents" in row]
+    summary = {
+        "signal_match_window_seconds": PAIR_SECONDS,
+        "all_live_entry_order_records": len(live),
+        "websocket_live_entry_order_records": len(native),
+        "websocket_live_orders_with_exchange_id": sum(bool(row.get("venue_order_id")) for row in native),
+        "websocket_live_orders_with_confirmed_fill": len(native_confirmed),
+        "websocket_live_closed_trades": sum(row.get("net_pnl_usd") is not None for row in native),
+        "websocket_live_realized_net_pnl_usd": str(sum(decimal_field(row.get("net_pnl_usd")) for row in native)),
+        "shadow_signals": len(shadow),
+        "shadow_signals_with_simulated_fill": sum(row.get("outcome") == "filled" for row in shadow),
+        "same_contract_and_side_pair_count": matched["same_signal_book"] + matched["nearby_signal"],
+        "pairs_from_same_signal_book": matched["same_signal_book"],
+        "pairs_from_nearby_signals": matched["nearby_signal"],
+        "paired_live_confirmed_fills": sum(row["live_order_id"] in confirmed_ids for row in aligned),
+        "paired_shadow_simulated_fills": sum(row["shadow_outcome"] == "filled" for row in aligned),
+        "pairs_with_fill_prices_on_both_sides": len(price_deltas),
+        "average_live_minus_shadow_fill_price_cents": (
+            str(round(sum(price_deltas) / len(price_deltas), 4)) if price_deltas else None),
+    }
+    summary.update({f"unpaired_{name}": count for name, count in sorted(matched.items())
+                    if name not in ("same_signal_book", "nearby_signal")})
+    outputs = (
+        ("oil-d-live-trades.csv", LIVE_FIELDS, live),
+        ("oil-d-live-attempts.csv", ATTEMPT_FIELDS, attempts),
+        ("oil-d-shadow-entries.csv", SHADOW_FIELDS, shadow),
+        ("oil-d-live-shadow-comparison.csv", PAIR_FIELDS, pairs),
+        ("oil-d-live-shadow-summary.csv", ("metric", "value"),
+         ({"metric": key, "value": value} for key, value in summary.items())),
+    )
+    for name, fields, rows in outputs:
+        write_oil_d_csv(directory / name, fields, rows)
+    return summary, [name for name, _, _ in outputs]
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -103,6 +303,11 @@ def sha256(path: Path) -> str:
 
 def export(sources: dict[str, Path], output: Path, only: set[str] | None = None, with_csv: bool = False,
            owner: tuple[int, int] | None = None, now: datetime | None = None) -> dict:
+    oil_d_scope = (only or set()) & OIL_D_SCOPES
+    if oil_d_scope and len(only) != 1:
+        raise SystemExit("An Oil D export selector must be used by itself.")
+    if oil_d_scope and "predictions" not in sources:
+        raise SystemExit("The Oil D export requires the predictions volume.")
     now = now or datetime.now(timezone.utc)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -113,9 +318,33 @@ def export(sources: dict[str, Path], output: Path, only: set[str] | None = None,
         scratch = Path(scratch)
         staged: list[tuple[Path, str]] = []
         for volume, root in sorted(sources.items()):
+            if oil_d_scope and volume != "predictions":
+                continue
             root = Path(root)
             if not root.is_dir():
                 raise SystemExit(f"Source {volume} is not a directory: {root}")
+            if oil_d_scope:
+                is_paper = only == {"oil-d-paper"}
+                snapshots = []
+                for relative in ((OIL_D_PAPER,) if is_paper else (OIL_D_LIVE, OIL_D_SHADOW)):
+                    source = root / relative
+                    if (not source.is_file() or source.is_symlink() or root.resolve() not in source.resolve().parents
+                            or not is_sqlite(source)):
+                        raise SystemExit(f"Oil D {'paper ' if is_paper else ''}database missing or invalid: {source}")
+                    snapshot = scratch / source.name
+                    sqlite_snapshot(source, snapshot)
+                    snapshots.append(snapshot)
+                if is_paper:
+                    manifest["oil_d_paper"] = oil_d_paper_csvs(snapshots[0], scratch)
+                    names = ("oil-d-15m.csv", "oil-d-1h.csv", "oil-d-summary.csv")
+                else:
+                    manifest["oil_d_live_shadow"], names = oil_d_live_shadow_csvs(*snapshots, scratch)
+                for name in names:
+                    path = scratch / name
+                    staged.append((path, name))
+                    manifest["files"].append({"path": name, "kind": "csv", "bytes": path.stat().st_size,
+                                              "sha256": sha256(path)})
+                continue
             for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
                 relative = path.relative_to(root)
                 name = f"{volume}/{relative.as_posix()}"
@@ -176,7 +405,8 @@ def main(argv=None):
     parser.add_argument("--source", action="append", required=True, metavar="NAME=PATH")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--only", help="comma list: a volume (predictions, bot-state) or folders such as "
-                                       "trading, crypto, updown, gold, wti, natgas; 'bot' = the Discord bot's state")
+                                       "trading, crypto, updown, gold, wti, natgas; 'bot' = the Discord bot's state. "
+                                       "Use 'oil-d-paper' or 'oil-d-live-shadow' by itself for targeted Oil D CSVs.")
     parser.add_argument("--csv", action="store_true", help="also export every SQLite table as CSV")
     parser.add_argument("--owner", help="uid:gid to own the archive (the VM user)")
     args = parser.parse_args(argv)
@@ -194,6 +424,16 @@ def main(argv=None):
           f"{len(dbs)} databases, to {args.output.name}")
     for f in dbs:
         print(f"  {f['path']}: " + ", ".join(f"{t} {n}" for t, n in f["tables"].items()))
+    for horizon, summary in result.get("oil_d_paper", {}).items():
+        print(f"  Oil D {horizon}: {summary['trades']} trades, {summary['closed_trades']} closed, "
+              f"{summary['open_trades']} open, net P&L ${summary['net_pnl_usd']}")
+    if comparison := result.get("oil_d_live_shadow"):
+        print(f"Oil D WebSocket live: {comparison['websocket_live_entry_order_records']} entry orders, "
+              f"{comparison['websocket_live_orders_with_confirmed_fill']} with a confirmed fill")
+        print(f"Shadow: {comparison['shadow_signals']} signals, "
+              f"{comparison['shadow_signals_with_simulated_fill']} with a simulated fill")
+        print(f"Paired: {comparison['same_contract_and_side_pair_count']} close signals, "
+              f"{comparison['pairs_with_fill_prices_on_both_sides']} comparable fill prices")
     if result["skipped"]:
         print(f"  skipped {len(result['skipped'])} file(s) that look like secrets")
     print(f"SHA-256 {result['archive_sha256']}")

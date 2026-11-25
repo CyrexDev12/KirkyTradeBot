@@ -12,18 +12,20 @@ Pausing stops new entries only; exits, deadlines and settlements keep running.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import math
 import os
 import signal
 import time
 
+from .book import CLOSED as CLOSED_BOOK, RESOLVED
 from .common import iso, utc
 from .config import StrategyConfig
 from .inputs import TRADING_DIR, LiveInputs
-from .jobs import WeeklyJobs
-from .paper_engine import ACTIVE_ENTRY
+from .jobs import WeeklyJobs, is_canceled
+from .paper_engine import ACTIVE_ENTRY, SETTLEMENT_PENDING, deadlines
 from .parlay import ParlayPublisher
 from .planner import WeeklyPlanner
 from .reports import lifecycle_alerts, trade_card_publication
@@ -55,7 +57,9 @@ class Worker:
         self.jobs = WeeklyJobs(store, cfg, self.planner, inputs, parlay=ParlayPublisher(store))
         self.engine = store.load_engine(cfg)
         self.last_jobs = 0.0
-        self.last_schedule = 0.0
+        self.last_schedule = None
+        self.schedule_rows: dict[str, dict] = {}
+        self.finished_books: set[str] = set()
         self.status = {"started_at": iso(datetime.now(timezone.utc)), "last_loop": None, "last_jobs": None,
                        "last_error": None, "last_heartbeat": None, "phase": "starting", "planning": None}
 
@@ -82,11 +86,50 @@ class Worker:
             except asyncio.TimeoutError:
                 pass
 
-    def _idle_slugs(self) -> set:
+    def _idle_slugs(self, now: datetime) -> set[str]:
         plan = self.store.latest_plan(self.cfg.strategy_id)
         if not plan:
             return set()
-        return {d["market_slug"] for d in plan["payload"]["decisions"] if d.get("market_slug")}
+        decisions = [d for d in plan["payload"]["decisions"]
+                     if d.get("market_slug") and d["market_slug"] not in self.finished_books]
+        recorded_kickoffs = self.store.contract_kickoffs({d["market_slug"] for d in decisions
+                                                          if d.get("game_id") not in self.schedule_rows})
+        eligible = set()
+        grace = timedelta(seconds=self.cfg.max_history_interval_seconds)
+        for decision in decisions:
+            slug = decision["market_slug"]
+            game = self.schedule_rows.get(decision.get("game_id"))
+            if game is None:
+                kickoff = recorded_kickoffs.get(slug)
+            elif is_canceled(game):
+                continue
+            else:
+                kickoff = game.get("kickoff") if game.get("kickoff_confirmed") else None
+            if kickoff:
+                _, exit_deadline = deadlines(utc(kickoff), self.cfg.hold_policy, self.cfg)
+                # Replay uses in-game observations under the frozen-thesis policy,
+                # including the first snapshot after the modeled exit deadline.
+                if now >= exit_deadline + grace:
+                    continue
+            eligible.add(slug)
+        return eligible
+
+    def _idle_batch(self, active: set[str], now: datetime) -> list[str]:
+        idle = self._idle_slugs(now) - active
+        due = self.recorder.due((), idle, time.monotonic())
+        budget = getattr(self.venue, "budget", None)
+        if due and budget is not None and budget.live_priority_active():
+            # Spread one idle sweep over the configured number of active ticks.
+            per_tick = max(1, math.ceil(len(idle) * self.cfg.active_poll_seconds / max(1, self.cfg.idle_poll_seconds)))
+            due.sort(key=lambda slug: self.recorder.last_poll.get(slug, -math.inf))
+            return due[:per_tick]
+        return due
+
+    def _apply_books(self, snapshots):
+        for snap in sorted(snapshots, key=lambda s: (s.received_at, s.slug)):
+            if snap.state in (CLOSED_BOOK, RESOLVED):
+                self.finished_books.add(snap.slug)
+            self.engine.on_snapshot(snap)
 
     def _commit(self, now):
         events = self.engine._pending[:]
@@ -110,15 +153,21 @@ class Worker:
         now = datetime.now(timezone.utc)
         self.engine = self.store.load_engine(self.cfg)  # pick up activations made by the planner
         active = {p.market_slug for tid, p in self.engine.state.plans.items()
-                  if trade_status(self.engine, tid) not in ("CLOSED", "CANCELED", "EXPIRED", "INVALIDATED")}
-        snaps = await self.recorder.poll(active, self._idle_slugs() - active)
-        for snap in sorted(snaps, key=lambda s: (s.received_at, s.slug)):
-            self.engine.on_snapshot(snap)
+                  if trade_status(self.engine, tid) not in ("CLOSED", "CANCELED", "EXPIRED", "INVALIDATED",
+                                                           SETTLEMENT_PENDING)}
+        self._apply_books(await self.recorder.poll(active, ()))
         self.engine.on_clock(now)
-        if time.monotonic() - self.last_schedule >= 60:
+        if self.last_schedule is None or time.monotonic() - self.last_schedule >= 60:
             self.last_schedule = time.monotonic()
             self._schedule_events(now)
         self._commit(now)
+        # Idle sampling can wait behind venue cooldowns. Journal active updates
+        # before starting background reads.
+        idle = self._idle_batch(active, datetime.now(timezone.utc))
+        idle_snaps = await self.recorder.poll((), idle)
+        if idle_snaps:
+            self._apply_books(idle_snaps)
+            self._commit(datetime.now(timezone.utc))
         if time.monotonic() - self.last_jobs >= 60:
             self.last_jobs = time.monotonic()
             self.status["phase"] = "weekly_jobs"
@@ -135,6 +184,8 @@ class Worker:
         except Exception as exc:
             self.status["last_error"] = f"schedule unavailable ({type(exc).__name__})"
             return
+        if rows:
+            self.schedule_rows = rows
         for tid, plan in sorted(self.engine.state.plans.items()):
             g = rows.get(plan.game_id)
             if not g:
@@ -182,7 +233,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = StrategyConfig.from_env()
     store = Store(DB_PATH)
-    venue = ReadOnlyVenueClient(min_interval=float(cfg.min_request_interval_seconds))
+    venue = ReadOnlyVenueClient(min_interval=float(cfg.min_request_interval_seconds), priority="nfl_paper")
     worker = Worker(store, cfg, venue, LiveInputs(venue, store))
     engine = worker.engine
     if engine.state.account_id is None:

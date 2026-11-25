@@ -6,13 +6,14 @@ gold 15-minute and hourly windows that start at the same time stay separate.
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import sqlite3
 from zoneinfo import ZoneInfo
+
+from .depth import available_depth, spend_depth
 
 PHOENIX = ZoneInfo("America/Phoenix")
 STARTING_BALANCE = 100.0
@@ -100,19 +101,13 @@ class Store:
                     if value is not None and row[name] is not None and value < row[name]:
                         return None
             spent = json.loads(row["spent"]) if row else {"bids": {}, "offers": {}}
-            adjusted = {}
-            for side, levels in (("bids", book.yes_bids), ("offers", book.yes_offers)):
-                # Keep only the spent quantity still visible at this level. Net gains
-                # in displayed depth can then replenish the account's capacity.
-                spent[side] = {str(price): min(qty, spent[side][str(price)]) for price, qty in levels
-                               if str(price) in spent[side]}
-                adjusted[side] = tuple((price, qty - spent[side].get(str(price), 0.0)) for price, qty in levels)
+            adjusted = available_depth(book, spent)
             db.execute("""INSERT INTO execution_depth(slug,observed_at,exchange_at,sequence,spent)
                           VALUES(?,?,?,?,?) ON CONFLICT(slug) DO UPDATE SET observed_at=excluded.observed_at,
                           exchange_at=coalesce(excluded.exchange_at,exchange_at),
                           sequence=coalesce(excluded.sequence,sequence), spent=excluded.spent""",
                        (slug, book.at, exchange_at, sequence, json.dumps(spent)))
-        return replace(book, yes_bids=adjusted["bids"], yes_offers=adjusted["offers"])
+        return adjusted
 
     def _consume(self, db, slug, book, side, buying, fills, quantity, participation):
         """Revalidate and spend the levels in the same transaction as the fill."""
@@ -122,17 +117,8 @@ class Store:
                 or (book.sequence is not None and row["sequence"] != book.sequence)):
             return False
         spent = json.loads(row["spent"])
-        canonical = "offers" if buying == (side == "UP") else "bids"
-        raw = book.yes_offers if canonical == "offers" else book.yes_bids
-        quoted = book.side_asks(side) if buying else book.side_bids(side)
-        physical = {price: (str(yes), depth) for (price, _), (yes, depth) in zip(quoted, raw)}
-        for price, q in fills:
-            if price not in physical:
-                return False
-            key, displayed = physical[price]
-            if q <= 0 or q > int(max(0.0, displayed - spent[canonical].get(key, 0.0)) * participation):
-                return False
-            spent[canonical][key] = displayed
+        if not spend_depth(book, spent, side, buying, fills, participation):
+            return False
         db.execute("UPDATE execution_depth SET spent=? WHERE slug=?", (json.dumps(spent), slug))
         return True
 

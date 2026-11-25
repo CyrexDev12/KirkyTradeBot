@@ -30,6 +30,8 @@ The [shared execution engine](UPDOWN.md#how-it-decides-every-5-s) applies the sa
 
 ## The five models
 
+The [WTI 15-minute replay](WTI_REPLAY.md) compares fill rates, prices, and net P&L across these models under different delay and depth assumptions.
+
 | Model | Idea | Why it might win |
 |---|---|---|
 | **A · Random walk** | Volatility from the last 2 hours, no drift. This is the gold bot's model. | Simple and well calibrated on calm days |

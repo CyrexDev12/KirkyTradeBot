@@ -60,13 +60,14 @@ class Rules:
                    roll_cooldown=get("ROLL_COOLDOWN", 1800))
 
     def gate(self, product, window, now):
+        return self.entry_hold(window, now, shock=self.detector.last_shock(), roll=self.detector.last_roll())
+
+    def entry_hold(self, window, now, *, shock, roll):
         for e in self.calendar.between(now - self.hold_after, now + self.hold_before):
             if e.impact == "high":
                 return f"holding off: {e.name} at {e.to_dict()['at_et']}"
-        shock = self.detector.last_shock()
         if shock is not None and 0 <= now - shock < self.shock_cooldown:
             return "holding off: price shock moments ago"
-        roll = self.detector.last_roll()
         if roll is not None and 0 <= now - roll < self.roll_cooldown:
             return "holding off: possible futures contract switch (price jumped with no news)"
         if self.calendar.is_roll_day(now) or self.calendar.is_roll_day(window.end):

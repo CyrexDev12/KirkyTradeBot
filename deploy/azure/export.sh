@@ -18,10 +18,12 @@ output_dir="$HOME/nfl-exports"
 remote_args=()
 skip_rule=false
 keep=false
+live_comparison=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --only)
             [[ "${2:-}" =~ ^[A-Za-z0-9_,-]+$ ]] || { echo '--only takes a comma list such as trading,gold' >&2; exit 1; }
+            if [[ "$2" == oil-d-live-shadow ]]; then live_comparison=true; fi
             remote_args+=(--only "$2"); shift 2 ;;
         --csv) remote_args+=(--csv); shift ;;
         --output) output_dir="${2:?--output needs a directory}"; shift 2 ;;
@@ -54,6 +56,9 @@ export_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ssh "${ssh_options[@]}" "$remote" 'umask 077; mkdir -p ~/nfl-upload'
 scp "${ssh_options[@]}" "$project_root/deploy/export_data.py" "$remote:nfl-upload/export-$export_id.py"
 scp "${ssh_options[@]}" "$project_root/deploy/azure/export-on-vm.sh" "$remote:nfl-upload/export-$export_id.sh"
+if [[ "$live_comparison" == true ]]; then
+    scp "${ssh_options[@]}" "$project_root/deploy/oil_d_live_export.py" "$remote:nfl-upload/oil-d-live-$export_id.py"
+fi
 quoted_args=""
 if [[ ${#remote_args[@]} -gt 0 ]]; then quoted_args="$(printf ' %q' "${remote_args[@]}")"; fi
 ssh "${ssh_options[@]}" "$remote" \
@@ -65,7 +70,7 @@ scp "${ssh_options[@]}" "$remote:nfl-exports/$export_id/$archive" "$remote:nfl-e
 if command -v sha256sum >/dev/null; then (cd "$output_dir" && sha256sum -c "$archive.sha256")
 else (cd "$output_dir" && shasum -a 256 -c "$archive.sha256"); fi
 chmod 600 "$output_dir/$archive" "$output_dir/$archive.sha256"
-ssh "${ssh_options[@]}" "$remote" "rm -f ~/nfl-upload/export-$export_id.py ~/nfl-upload/export-$export_id.sh"
+ssh "${ssh_options[@]}" "$remote" "rm -f ~/nfl-upload/export-$export_id.py ~/nfl-upload/export-$export_id.sh ~/nfl-upload/oil-d-live-$export_id.py"
 if [[ "$keep" != true ]]; then
     ssh "${ssh_options[@]}" "$remote" "rm -rf ~/nfl-exports/$export_id"
 fi

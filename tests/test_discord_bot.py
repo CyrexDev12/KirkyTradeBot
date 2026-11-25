@@ -187,7 +187,8 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
                                  "picks","trade","account","performance","why-no-trades","health",
                                  "paper-pause","paper-resume","paper-channels","parlay","crypto-account","crypto-trades","crypto-stats",
                                  "updown-account","updown-trades","updown-stats",
-                                 "gold-account","gold-results","gold-stats","gold-picks","chiefkirkey","oil","gas","player-stats","pygraph"}
+                                 "gold-account","gold-results","gold-stats","gold-picks","chiefkirkey","oil","oil-live",
+                                 "oilpaperlivetest","oilpaperlivetestchannel","gas","player-stats","pygraph"}
         assert bot.intents.value == 1
         for command in commands.values():
             command.to_dict(bot.tree)
@@ -199,6 +200,18 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
         with pytest.raises(discord.app_commands.MissingPermissions):
             channel_setup.checks[0](SimpleNamespace(permissions=discord.Permissions.none()))
         assert {c.value for c in channel_setup.parameters[0].choices} == {"picks", "updates", "reports", "parlay", "crypto", "gold", "players", "chief", "oil", "gas"}
+        live = commands["oil-live"]
+        assert {c.name for c in live.commands} == {"channel", "status", "chart", "off"}
+        paper_test = commands["oilpaperlivetest"]
+        assert {c.name for c in paper_test.commands} == {"graph", "status"}
+        assert commands["oilpaperlivetestchannel"].parameters[0].name == "channel"
+        for command in [*live.commands, *paper_test.commands, commands["oilpaperlivetestchannel"]]:
+            check_live_user = command.checks[0]
+            with pytest.raises(discord.app_commands.CheckFailure):
+                check_live_user(SimpleNamespace(guild_id=12, permissions=discord.Permissions(manage_guild=True)))
+            with pytest.raises(discord.app_commands.CheckFailure):
+                check_live_user(SimpleNamespace(guild_id=13, permissions=discord.Permissions(administrator=True)))
+            assert check_live_user(SimpleNamespace(guild_id=12, permissions=discord.Permissions(administrator=True)))
         games = [{**payload["game"],"game_id":str(i)} for i in range(16)]
         view = MatchupView(games)
         assert len(view.children) == 16
@@ -216,6 +229,38 @@ def test_buttons_embeds_and_runtime_admin_permissions(payload,tmp_path):
     payload["prediction"]["kind"] = "walk_forward_reconstruction"
     text = str(matchup_embed(payload).to_dict())
     assert "Insufficient current-season data" in text and "Historical reconstruction" in text
+
+
+def test_oil_live_publishes_every_event_only_to_operator_guild(tmp_path):
+    from bot.oil_live import CURSORS, OilLivePublisher, status_card
+    from bot.paper import PaperPosts
+
+    posts = PaperPosts(tmp_path / "bot.sqlite")
+    posts.configure_oil_live(12, 60, 1)
+    posts.configure_oil_live(13, 61, 0)
+    feed = SimpleNamespace(oil_live=AsyncMock(return_value={"events": [
+        {"id": 2, "kind": "fill", "title": "Buy filled", "quantity": "2", "price": "0.425"},
+        {"id": 3, "kind": "trade_closed", "net_pnl": "-0.4", "fees_exact": False},
+    ]}))
+    delivery = SimpleNamespace(deliver=AsyncMock(side_effect=[TimeoutError, 50, 51]))
+
+    runner = OilLivePublisher(feed, posts, delivery, guild_id=12)
+    with pytest.raises(TimeoutError):
+        asyncio.run(runner.tick())
+    assert {r["guild_id"]: r["event_id"] for r in posts.desk_routes("oil-live", CURSORS)} == {12: 1, 13: 0}
+    posts.configure_oil_live(12, 62, 3)
+    asyncio.run(runner.tick())
+
+    assert [call.args[0]["channel_id"] for call in delivery.deliver.await_args_list] == [60, 62, 62]
+    posts_sent = [call.args[1] for call in delivery.deliver.await_args_list]
+    assert [item["publication_id"] for item in posts_sent] == ["oil-live:2@60", "oil-live:2@62", "oil-live:3@62"]
+    assert ("Price per contract", "42.5¢") in posts_sent[1]["payload"]["fields"]
+    assert ("Net P&L (estimated fees)", "-$0.40") in posts_sent[2]["payload"]["fields"]
+    assert {r["guild_id"]: r["event_id"] for r in posts.desk_routes("oil-live", CURSORS)} == {12: 3, 13: 0}
+    status = status_card({"enabled": True, "net_pnl": "0.8", "pnl_estimated": True, "matched_trades": 1,
+                          "paired_live_net_pnl": "0.4", "paper_net_pnl": "0.6"}, 62)
+    assert ("Live net P&L (estimated fees)", "$0.80") in status["fields"]
+    assert ("Live vs. paper · 1 matched", "Live $0.40 · Paper $0.60") in status["fields"]
 
 
 def test_crypto_reconciles_before_cursor_advances_and_preserves_cursor_on_reroute(tmp_path):

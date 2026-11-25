@@ -24,6 +24,8 @@ public REST collector is the default.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import random
 import re
@@ -32,8 +34,11 @@ import time
 import httpx
 
 from .book import parse_book
+from .request_budget import RequestBudget, retry_after_seconds
 
 BASE = "https://gateway.polymarket.us"
+MAX_BACKGROUND_SLOT_WAIT = 8.0
+MAX_NFL_PAPER_SLOT_WAIT = 60.0
 _SLUG = r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,200}"
 ALLOWED_GET = tuple(re.compile(p) for p in (
     r"^/v2/leagues/nfl/events$",
@@ -50,6 +55,42 @@ class PaperOnlyViolation(RuntimeError):
     pass
 
 
+class PublicRequestDeadline(httpx.TimeoutException):
+    def __init__(self):
+        super().__init__("The shared Polymarket US request cooldown or pacing outlasted this check.")
+
+
+_request_scope = ContextVar("public_request_scope", default=(None, None))
+
+
+@contextmanager
+def public_request_scope(priority, deadline=None):
+    token = _request_scope.set((priority, deadline))
+    try:
+        yield
+    finally:
+        _request_scope.reset(token)
+
+
+async def acquire_public_slot(budget, default_priority="background"):
+    if budget is None:
+        return
+    priority, deadline = _request_scope.get()
+    priority = priority or default_priority
+    if deadline is None:
+        wait = MAX_NFL_PAPER_SLOT_WAIT if priority == "nfl_paper" else MAX_BACKGROUND_SLOT_WAIT
+        deadline = budget.clock() + wait
+    if not await budget.acquire(priority, deadline) or budget.clock() >= deadline:
+        raise PublicRequestDeadline()
+
+
+async def record_public_throttle(budget, response, default_priority="background"):
+    if budget is not None and response.status_code == 429:
+        priority, _ = _request_scope.get()
+        await asyncio.to_thread(budget.observe_rate_limit, response.headers.get("retry-after"),
+                                priority=priority or default_priority)
+
+
 def check_request(method: str, path: str) -> None:
     if method.upper() != "GET":
         raise PaperOnlyViolation(f"PAPER_ONLY: refusing {method} {path}")
@@ -59,15 +100,17 @@ def check_request(method: str, path: str) -> None:
 
 class ReadOnlyVenueClient:
     def __init__(self, client: httpx.AsyncClient | None = None, min_interval: float = 0.6, max_retries: int = 3,
-                 clock=lambda: datetime.now(timezone.utc)):
+                 clock=lambda: datetime.now(timezone.utc), *, priority="background"):
         self.client = client or httpx.AsyncClient(base_url=BASE, timeout=15,
                                                    limits=httpx.Limits(max_connections=4))
         self.min_interval, self.max_retries, self.clock = min_interval, max_retries, clock
         self._lock = asyncio.Lock()
         self._next = 0.0
+        self.budget = RequestBudget.from_env()
+        self.priority = priority
         self.last_error: str | None = None
 
-    async def request(self, method: str, path: str, params: dict | None = None) -> dict:
+    async def request(self, method: str, path: str, params: dict | None = None, *, on_dispatch=None) -> dict:
         check_request(method, path)
         for attempt in range(self.max_retries + 1):
             async with self._lock:
@@ -75,14 +118,19 @@ class ReadOnlyVenueClient:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 self._next = time.monotonic() + self.min_interval * (1 + random.random() * 0.25)
+            await acquire_public_slot(self.budget, self.priority)
+            if on_dispatch is not None:
+                on_dispatch()
             response = await self.client.get(path, params=params)
             if response.status_code == 429 or response.status_code >= 500:
-                retry_after = response.headers.get("retry-after")
-                delay = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() \
-                    else min(30.0, 2 ** attempt) * (1 + random.random() * 0.5)
+                await record_public_throttle(self.budget, response, self.priority)
                 self.last_error = f"HTTP {response.status_code}"
                 if attempt < self.max_retries:
-                    await asyncio.sleep(delay)
+                    if response.status_code != 429 or self.budget is None:
+                        delay = retry_after_seconds(response.headers.get("retry-after"), time.time())
+                        if delay is None:
+                            delay = min(30.0, 2 ** attempt) * (1 + random.random() * 0.5)
+                        await asyncio.sleep(delay)
                     continue
             response.raise_for_status()
             self.last_error = None
@@ -91,6 +139,17 @@ class ReadOnlyVenueClient:
 
     async def get(self, path: str, params: dict | None = None) -> dict:
         return await self.request("GET", path, params)
+
+    async def get_with_dispatch_time(self, path: str, clock) -> tuple[dict, float]:
+        """Return the request time of the successful GET, after pacing and any retries."""
+        requested_at = None
+
+        def mark_dispatch():
+            nonlocal requested_at
+            requested_at = clock()
+
+        payload = await self.request("GET", path, on_dispatch=mark_dispatch)
+        return payload, requested_at
 
     async def book(self, slug: str):
         payload = await self.get(f"/v1/markets/{slug}/book")

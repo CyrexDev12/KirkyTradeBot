@@ -8,8 +8,9 @@ on that same data. Run: ``python -m backend.wti.worker`` (crude, ``data/wti``) o
 from __future__ import annotations
 
 import asyncio
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
+from functools import partial
 import json
 import logging
 import signal as os_signal
@@ -18,7 +19,7 @@ import time
 
 import httpx
 
-from ..trading.venue import BASE, ReadOnlyVenueClient
+from ..trading.venue import BASE, ReadOnlyVenueClient, public_request_scope
 from ..updown.feed import Feed
 from ..updown.model import sigma_per_second
 from ..updown.store import Store
@@ -27,6 +28,7 @@ from . import Rules
 from .commodity import WTI, Commodity
 from .events import Calendar, Detector, front_month_expiry
 from .models import MODEL_INFO, ModelSet
+from .oil_d_shadow_inputs import ShadowInputs, publish_shadow_inputs
 
 logger = logging.getLogger(__name__)
 ANNOUNCE_AHEAD = 1800  # announce scheduled high/medium releases 30 minutes ahead
@@ -35,10 +37,11 @@ ANNOUNCE_AHEAD = 1800  # announce scheduled high/medium releases 30 minutes ahea
 class SharedFeed:
     """Wraps a Feed so N model workers share each read within a tick (2-second cache)."""
 
-    def __init__(self, feed, clock=time.time, ttl=2.0):
+    def __init__(self, feed, clock=time.time, ttl=2.0, capture=None):
         self.feed, self.clock, self.ttl, self._cache = feed, clock, ttl, {}
+        self.capture = capture
 
-    async def _get(self, key, call, *, requested_after=None):
+    async def _get(self, key, call, *, requested_after=None, signal_input=False):
         hit = self._cache.get(key)
         if hit and self.clock() - hit[0] < self.ttl and (requested_after is None or hit[2] >= requested_after):
             if isinstance(hit[1], Exception):
@@ -46,7 +49,9 @@ class SharedFeed:
             return hit[1]
         requested_at = self.clock()
         try:
-            value = await call()
+            scope = public_request_scope("wti_signal") if self.capture and signal_input else nullcontext()
+            with scope:
+                value = await call()
         except ERRORS as exc:
             self._cache[key] = (self.clock(), exc, requested_at)
             raise
@@ -57,22 +62,32 @@ class SharedFeed:
         return value
 
     async def window(self, product, start):
-        return await self._get(("window", product.key, start), lambda: self.feed.window(product, start))
+        window = await self._get(("window", product.key, start), lambda: self.feed.window(product, start),
+                                 signal_input=product.key == "wti-15m")
+        if self.capture:
+            self.capture.window(window)
+        return window
 
     async def settlement(self, product, start):
-        return await self._get(("settle", product.key, start), lambda: self.feed.settlement(product, start))
+        async def fetch():
+            result = await self.feed.settlement(product, start)
+            if self.capture and product.key == "wti-15m":
+                self.capture.settlement(result)
+            return result
+        return await self._get(("settle", product.key, start), fetch)
 
     async def book(self, slug):
-        return await self._get(("book", slug), lambda: self.feed.book(slug))
+        return await self._get(("book", slug), lambda: self.feed.book(slug), signal_input="-wti-updown-15m-" in slug)
 
     async def execution_book(self, slug, ready_at):
-        return await self._get(("book", slug), lambda: self.feed.book(slug), requested_after=ready_at)
+        return await self._get(("book", slug), lambda: self.feed.book(slug), requested_after=ready_at,
+                               signal_input="-wti-updown-15m-" in slug)
 
     async def seconds(self, ids, lookback=120):
-        return await self._get(("s", tuple(ids), lookback), lambda: self.feed.seconds(ids, lookback))
+        return await self._get(("s", tuple(ids), lookback), lambda: self.feed.seconds(ids, lookback), signal_input=True)
 
     async def minutes(self, ids, lookback=7200):
-        return await self._get(("m", tuple(ids), lookback), lambda: self.feed.minutes(ids, lookback))
+        return await self._get(("m", tuple(ids), lookback), lambda: self.feed.minutes(ids, lookback), signal_input=True)
 
     async def coinbase(self, product_id):
         raise ValueError("no Coinbase market for this product")
@@ -110,17 +125,19 @@ class InfoLog:
 
 class Desk:
     def __init__(self, feed, settings=None, models=None, directory=None, clock=time.time, calendar=None,
-                 commodity: Commodity = WTI):
+                 commodity: Commodity = WTI, capture=None):
         self.commodity = commodity
         self.directory = directory or commodity.directory()
         self.clock, self.settings = clock, settings or commodity.settings()
         models = models or commodity.models()
-        self.feed = SharedFeed(feed, clock)
+        self.feed = SharedFeed(feed, clock, capture=capture)
         self.calendar = calendar or Calendar(self.directory / "events.json", commodity.recurring, commodity.jumps)
         self.detector = Detector(roll_jump=commodity.roll_jump)
         self.info = InfoLog(self.directory / "info.sqlite3")
         self.rules = Rules.for_commodity(commodity, self.calendar, self.detector)
         self.modelset = ModelSet(self.calendar, self.detector)
+        self._share_wti_inputs = any(product.key == "wti-15m" for product in self.settings.products)
+        self._last_wti_inputs = None
         self.workers = {}
         for model_id in models:
             if model_id not in MODEL_INFO:
@@ -129,6 +146,7 @@ class Desk:
             self.workers[model_id] = Worker(store, self.feed, self.settings, clock=clock,
                                             fair_fn=self.modelset.fair_fn(model_id), gate=self.rules.gate,
                                             pre_exit=self.rules.pre_exit,
+                                            on_intent=partial(capture.intent, model_id) if capture else None,
                                             tag={"model": model_id, "model_name": MODEL_INFO[model_id][0],
                                                  "commodity": commodity.key})
         self.errors = {}
@@ -147,6 +165,17 @@ class Desk:
         self.errors.pop("watch", None)
         for event in self.detector.update(seconds, sigma, self.calendar):
             self.info.add(event.at, "detected", event.name, event.impact, f"detected:{int(event.at)}:{event.name[:20]}")
+        if self._share_wti_inputs and seconds and len(minutes) >= 31:
+            index_at, index_price = seconds[-1]
+            reference = (index_at, index_price, tuple(price for _, price in minutes[-121:]),
+                         self.detector.last_shock(), self.detector.last_roll())
+            if reference != self._last_wti_inputs:
+                try:
+                    await asyncio.to_thread(publish_shadow_inputs, self.directory, ShadowInputs(self.clock(), *reference))
+                except (OSError, ValueError):
+                    logger.warning("Could not publish Oil D shadow reference inputs.", exc_info=True)
+                else:
+                    self._last_wti_inputs = reference
         for event in self.calendar.between(now, now + ANNOUNCE_AHEAD):
             if event.impact != "low":
                 self.info.add(event.at, "scheduled", event.name, event.impact, f"scheduled:{int(event.at)}:{event.name}")
@@ -185,20 +214,35 @@ async def serve(commodity: Commodity = WTI):
     headers = {"User-Agent": "nfl-fair-value-paper/1"}
     async with httpx.AsyncClient(base_url=BASE, timeout=10, headers=headers) as pm, \
             httpx.AsyncClient(timeout=8, headers=headers) as other:
-        desk = Desk(Feed(ReadOnlyVenueClient(pm, min_interval=0.2), other), commodity=commodity)
-        while not stop.is_set():
+        feed = Feed(ReadOnlyVenueClient(pm, min_interval=0.2), other)
+        capture = None
+        if commodity.key == "wti":
+            from .replay_capture import Capture
             try:
-                await desk.tick()
-            except Exception:
-                logger.exception("%s desk cycle failed", commodity.name)
-                desk.errors["cycle"] = "unexpected error (see logs)"
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(desk.health()))
-            tmp.replace(path)
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                pass
+                capture = Capture(directory, feed)
+            except (OSError, sqlite3.Error):
+                logger.exception("Could not start WTI replay capture")
+        try:
+            desk = Desk(feed, commodity=commodity, capture=capture)
+            while not stop.is_set():
+                try:
+                    await desk.tick()
+                except Exception:
+                    logger.exception("%s desk cycle failed", commodity.name)
+                    desk.errors["cycle"] = "unexpected error (see logs)"
+                tmp = path.with_suffix(".tmp")
+                health = desk.health()
+                if capture:
+                    health["replay_capture"] = capture.status
+                tmp.write_text(json.dumps(health))
+                tmp.replace(path)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if capture:
+                await capture.close()
 
 
 if __name__ == "__main__":

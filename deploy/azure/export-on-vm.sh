@@ -13,10 +13,16 @@ project=nfl-fair-value
 image="${NFL_EXPORT_IMAGE:-$project-backend:latest}"
 out_dir="$vm_root/nfl-exports/$export_id"
 extra=()
+mounts=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --only)
             [[ "${2:-}" =~ ^[A-Za-z0-9_,-]+$ ]] || { echo '--only takes a comma list such as trading,gold' >&2; exit 1; }
+            if [[ "$2" == oil-d-live-shadow ]]; then
+                reader="$(dirname "$exporter")/oil-d-live-$export_id.py"
+                [[ -f "$reader" ]] || { echo 'The Oil D comparison reader was not uploaded.' >&2; exit 1; }
+                mounts+=(--mount "type=bind,source=$reader,target=/tool/oil_d_live_export.py,readonly")
+            fi
             extra+=(--only "$2"); shift 2 ;;
         --csv) extra+=(--csv); shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -36,6 +42,7 @@ sudo docker run --rm --network none --read-only --user 0 --tmpfs /tmp \
     --mount "type=volume,source=${project}_predictions,target=/source/predictions" \
     --mount "type=volume,source=${project}_bot-state,target=/source/bot-state" \
     --mount "type=bind,source=$exporter,target=/tool/export_data.py,readonly" \
+    "${mounts[@]}" \
     --mount "type=bind,source=$out_dir,target=/export" \
     --entrypoint python "$image" /tool/export_data.py \
     --source predictions=/source/predictions --source bot-state=/source/bot-state \

@@ -214,8 +214,24 @@ def test_desk_runs_five_model_accounts_on_one_feed(tmp_path):
     feed = FakeFeed(lambda: now[0])
     settings = Settings(products=wti_products(("15m", "1h", "1d")), max_index_age=30, take_profit_target=0.5,
                         stop_loss=0.5)
-    desk = Desk(feed, settings, models=("A", "B", "C", "D", "E"), directory=tmp_path, clock=lambda: now[0])
+    intents, settlements = [], []
+
+    class CaptureProbe:
+        def window(self, window):
+            pass
+
+        def intent(self, model, key, slug, at, payload):
+            intents.append((model, key, slug, at, payload))
+
+        def settlement(self, result):
+            settlements.append(result)
+
+    desk = Desk(feed, settings, models=("A", "B", "C", "D", "E"), directory=tmp_path, clock=lambda: now[0],
+                capture=CaptureProbe())
     asyncio.run(desk.tick())
+    assert {model for model, key, _, _, _ in intents if key == "wti-15m"} == set("ABCDE")
+    assert all(order["action"] == "buy" and order["ready_at"] == at + 2 for _, _, _, at, order in intents)
+    assert all(not w.store.open_trades() for w in desk.workers.values())
     assert feed.calls["seconds"] == 1 and feed.calls["minutes"] == 1  # shared across 5 models
     assert feed.calls["book"] <= 2  # one per market, not one per model
     now[0] += 2
@@ -230,6 +246,7 @@ def test_desk_runs_five_model_accounts_on_one_feed(tmp_path):
     for worker in desk.workers.values():
         closed = [t for t in worker.store.trades(10) if t.get("status") == "CLOSED"]
         assert closed and closed[0]["key"] == "wti-15m"
+    assert len(settlements) == 1 and settlements[0].yes_payout == 1
     health = desk.health()
     assert health["models"] == list("ABCDE") and health["front_month"]["contract"] == "Jan 2027"
     assert health["next_news"]["name"] == "API weekly crude inventory"

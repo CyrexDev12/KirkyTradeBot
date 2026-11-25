@@ -549,6 +549,66 @@ def test_worker_heartbeat_and_progress_continue_during_slow_planning(tmp_path, m
     asyncio.run(scenario())
 
 
+def test_worker_paces_idle_books_around_live_priority_and_preserves_active_fills(tmp_path, monkeypatch, engine):
+    from backend.trading import worker as worker_module
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return T0 + timedelta(seconds=5)
+
+    class Budget:
+        armed = True
+
+        def live_priority_active(self):
+            return self.armed
+
+    class Venue:
+        budget = Budget()
+        last_error = None
+
+        def __init__(self):
+            self.book_calls = []
+
+        async def book(self, slug):
+            self.book_calls.append(slug)
+            if slug == "a-resolved":
+                assert store.load_engine(CFG).state.positions["T-1"].qty_open == 40
+                return snap(5, [], [], slug=slug, state="RESOLVED")
+            return snap(5, [(0.13, 100)], [(0.15, 80)], slug=slug)
+
+    monkeypatch.setattr(worker_module, "datetime", Clock)
+    monkeypatch.setattr(worker_module, "HEALTH_PATH", tmp_path / "worker.health.json")
+    store = Store(tmp_path / "worker.sqlite3")
+    assert engine.submit(plan(slug="z-active"), T0)["accepted"]
+    store.commit(engine, T0)
+    expired_contract = replace(moneyline_spec(GAME, ml_match(), GAME["home"]),
+                               market_slug="f-old-recorded", kickoff=T0 - timedelta(days=1))
+    store.record_contract(expired_contract, T0 - timedelta(days=3))
+    venue = Venue()
+    worker = worker_module.Worker(store, CFG, venue, FakeInputs(book_now(T0)))
+    worker.last_schedule = worker.last_jobs = worker_module.time.monotonic()
+    games = {
+        "a-resolved": {"kickoff": T0 - timedelta(minutes=30), "kickoff_confirmed": True},
+        "b-in-game": {"kickoff": T0 - timedelta(minutes=30), "kickoff_confirmed": True},
+        "d-expired": {"kickoff": T0 - timedelta(hours=5), "kickoff_confirmed": True},
+        "e-canceled": {"kickoff": KICK, "kickoff_confirmed": True, "source_status": "canceled"},
+    }
+    worker.schedule_rows = games
+    decisions = [{"market_slug": slug, "game_id": slug} for slug in (*games, "c-unknown", "f-old-recorded")]
+    monkeypatch.setattr(store, "latest_plan", lambda strategy: {"payload": {"decisions": decisions}})
+
+    asyncio.run(worker.loop_once())
+    assert venue.book_calls == ["z-active", "a-resolved"]
+    assert store.load_engine(CFG).state.positions["T-1"].qty_open == 40
+    assert len(store.snapshots("a-resolved")) == 1
+    assert worker._idle_slugs(T0) == {"b-in-game", "c-unknown"}
+
+    venue.budget.armed = False
+    asyncio.run(worker.loop_once())
+    assert venue.book_calls == ["z-active", "a-resolved", "b-in-game", "c-unknown"]
+
+
 def test_worker_persists_loop_failure_and_closes_client_on_cancellation(tmp_path, monkeypatch):
     from backend.trading import worker as worker_module
     health = tmp_path / "worker.health.json"
@@ -774,11 +834,16 @@ def test_paper_only_cannot_reach_order_submission():
     with pytest.raises(ValueError):
         StrategyConfig(mode="LIVE")
     root = Path(__file__).resolve().parents[1] / "backend"
+    live_adapter = root / "wti" / "live_venue.py"
+    live_worker = root / "wti" / "live_worker.py"
     for file in root.rglob("*.py"):
         text = file.read_text(encoding="utf-8")
-        # The backend never issues an HTTP POST and never names an order route (route decorators are allowed).
-        assert not re.search(r"/v1/orders|create[-_]?order|(client|httpx|session|venue)\.(post|put|delete)\(",
-                             text, re.I), file
+        if file != live_adapter:
+            # Only the dedicated authenticated adapter can name or call exchange write routes.
+            assert not re.search(r"/v1/orders|create[-_]?order|(client|httpx|session|venue)\.(post|put|delete)\(",
+                                 text, re.I), file
+        if file not in (live_adapter, live_worker):
+            assert not re.search(r"\blive_venue\b|\bLiveVenue\b", text), file
 
 
 def test_paper_api_endpoints(tmp_path, monkeypatch):
