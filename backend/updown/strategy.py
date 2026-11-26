@@ -127,7 +127,8 @@ class Settings:
         lo, hi = (float(x) for x in get("PRICE_RANGE", "0.10-0.90").split("-", 1))
         if prefix in FUTURES:
             symbol, decimals = FUTURES[prefix]
-            products = futures_products(symbol, (h.strip() for h in get("HORIZONS", "15m,1h,1d").split(",")
+            # 15-minute and hourly by default; add the daily window with e.g. WTI_HORIZONS=15m,1h,1d
+            products = futures_products(symbol, (h.strip() for h in get("HORIZONS", "15m,1h").split(",")
                                                  if h.strip()), decimals)
         elif gold:
             products = gold_products(h.strip() for h in get("HORIZONS", "5m,15m,1h").split(",") if h.strip())

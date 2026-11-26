@@ -22,9 +22,10 @@ def ts(*a):
 
 def test_gas_settings_markets_and_live_shapes():
     s = Settings.from_env({}, prefix="NATGAS")
-    assert [p.key for p in s.products] == ["natgas-15m", "natgas-1h", "natgas-1d"]
+    assert [p.key for p in s.products] == ["natgas-15m", "natgas-1h"]  # daily is opt-in
     assert {(p.coinbase, p.decimals, p.index_id) for p in s.products} == {(None, 4, "commodity:natgas")}
-    start = s.products[2].current_start(ts(2026, 11, 23, 3, 40))
+    daily = Settings.from_env({"NATGAS_HORIZONS": "15m,1h,1d"}, prefix="NATGAS").products[2]
+    start = daily.current_start(ts(2026, 11, 23, 3, 40))
     assert event_slug("natgas", start, "1d") == "natgas-updown-1d-2026-11-22-2315z"
     w = parse_window("natgas", FIX["event_15m"], rule="point")
     d = parse_window("natgas", FIX["event_1d"], rule="point")
@@ -116,7 +117,7 @@ def test_gas_api_discord_and_chief(tmp_path, monkeypatch):
     app.include_router(router)
     client = TestClient(app)
     board = client.get("/api/natgas/models").json()
-    assert board["commodity"] == "natgas" and board["markets"] == ["natgas-15m", "natgas-1h", "natgas-1d"]
+    assert board["commodity"] == "natgas" and board["markets"] == ["natgas-15m", "natgas-1h"]
     assert client.get("/api/natgas/info").json()["front_month"]["contract"]
     from bot.oil import GAS, leaderboard_card
     from bot.updown import updown_trade_card
